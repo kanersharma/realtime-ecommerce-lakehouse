@@ -1,0 +1,163 @@
+# Real-time e-commerce lakehouse:
+#   generator -> Kafka -> Flink SQL -> Iceberg (REST catalog + RustFS/S3) -> Trino -> Streamlit
+# Demo credentials only (admin/password). Never reuse them outside this local stack.
+
+x-flink: &flink
+  build: ./flink
+  image: lakehouse-flink:1.20
+  environment:
+    AWS_REGION: us-east-1
+    FLINK_PROPERTIES: |
+      jobmanager.rpc.address: jobmanager
+      rest.address: jobmanager
+      taskmanager.numberOfTaskSlots: 4
+      parallelism.default: 2
+      jobmanager.memory.process.size: 1024m
+      taskmanager.memory.process.size: 1536m
+      # ponytail: checkpoints live in JobManager memory; a JM restart loses state.
+      # Use S3 checkpoint storage (flink-s3-fs plugin) for real HA.
+      restart-strategy.type: fixed-delay
+      restart-strategy.fixed-delay.attempts: 2147483647
+      restart-strategy.fixed-delay.delay: 10 s
+
+services:
+  # ---------- Streaming ----------
+  kafka:
+    image: apache/kafka:3.9.0
+    ports: ["29092:29092"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: -Xmx512m -Xms512m
+    healthcheck:
+      test: /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null
+      interval: 5s
+      retries: 30
+
+  kafka-init:
+    image: apache/kafka:3.9.0
+    depends_on: { kafka: { condition: service_healthy } }
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "for t in clicks orders; do
+       /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic $$t --partitions 3 --replication-factor 1 --config retention.ms=86400000;
+       done"
+
+  kafka-ui:
+    image: kafbat/kafka-ui:v1.1.0
+    ports: ["8088:8080"]
+    depends_on: { kafka: { condition: service_healthy } }
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+  generator:
+    build: ./generator
+    depends_on: { kafka-init: { condition: service_completed_successfully } }
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      SESSIONS_PER_SEC: ${SESSIONS_PER_SEC:-20}
+
+  # ---------- Storage + catalog ----------
+  # S3-compatible object store (Apache-2.0). MinIO stopped publishing images in 2025.
+  rustfs:
+    image: rustfs/rustfs:1.0.0
+    ports: ["9000:9000", "9001:9001"]
+    environment:
+      RUSTFS_ACCESS_KEY: admin
+      RUSTFS_SECRET_KEY: password
+      RUSTFS_CONSOLE_ENABLE: "true"
+    volumes: [s3-data:/data]
+
+  s3-init:
+    image: amazon/aws-cli:2.37.4
+    depends_on: [rustfs]
+    environment:
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: us-east-1
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "until aws --endpoint-url http://rustfs:9000 s3 ls > /dev/null 2>&1; do sleep 1; done;
+       aws --endpoint-url http://rustfs:9000 s3 mb s3://warehouse || true"
+
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:1.8.1
+    ports: ["8181:8181"]
+    depends_on: { s3-init: { condition: service_completed_successfully } }
+    environment:
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://rustfs:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      # File-backed SQLite: the default in-memory DB is per-connection, so pooled
+      # connections would each see an empty catalog. The volume keeps tables across restarts.
+      # WAL + busy_timeout: the 4 Flink committers commit concurrently on every checkpoint;
+      # without them SQLite's single-writer lock fails commits with SQLITE_BUSY.
+      # ponytail: SQLite serializes all commits; use a Postgres-backed catalog for many writers.
+      CATALOG_URI: jdbc:sqlite:/home/iceberg/catalog.db?journal_mode=WAL&busy_timeout=30000
+    volumes: [catalog-data:/home/iceberg]
+
+  # ---------- Processing ----------
+  jobmanager:
+    <<: *flink
+    command: jobmanager
+    ports: ["8081:8081"]
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8081"]
+      interval: 5s
+      retries: 30
+
+  taskmanager:
+    <<: *flink
+    command: taskmanager
+    depends_on: [jobmanager]
+
+  # One-shot: submits flink/sql/pipeline.sql to the cluster, then exits.
+  # Skips submission if the job already runs, so a repeated `docker compose up` can't start a duplicate.
+  flink-job:
+    <<: *flink
+    command: ["bash", "-c", "if curl -sf http://jobmanager:8081/jobs/overview | grep -qE '\"state\":\"(RUNNING|RESTARTING|CREATED|INITIALIZING)\"'; then echo 'Pipeline already running - not resubmitting.'; else bin/sql-client.sh -f /opt/sql/pipeline.sql; fi"]
+    restart: on-failure:10
+    volumes: ["./flink/sql:/opt/sql:ro"]
+    depends_on:
+      jobmanager: { condition: service_healthy }
+      taskmanager: { condition: service_started }
+      iceberg-rest: { condition: service_started }
+      kafka-init: { condition: service_completed_successfully }
+
+  # ---------- Serving ----------
+  trino:
+    image: trinodb/trino:470
+    ports: ["8090:8080"]  # host 8090: 8080 is usually taken (Airflow, etc.)
+    mem_limit: 1536m
+    restart: unless-stopped
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+      - ./trino/jvm.config:/etc/trino/jvm.config:ro
+    depends_on: [iceberg-rest]
+
+  dashboard:
+    build: ./dashboard
+    ports: ["8501:8501"]
+    depends_on: [trino]
+    environment:
+      TRINO_HOST: trino
+      TRINO_PORT: 8080
+
+volumes:
+  s3-data:
+  catalog-data:
