@@ -250,3 +250,7 @@ These are deliberate simplifications for a laptop demo, each with its production
 ## Tech stack
 
 `Apache Kafka 3.9` · `Apache Flink 1.20` · `Apache Iceberg 1.8.1` · `Trino 470` · `RustFS 1.0` · `Python 3.12` · `Streamlit 1.41` · `Docker Compose`
+
+## License
+
+[MIT](LICENSE) © 2026 Kaner Sharma
