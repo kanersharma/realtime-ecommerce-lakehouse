@@ -1,0 +1,3 @@
+# Config files are mounted into Linux containers; CRLF would corrupt them (e.g. JVM flags).
+* text=auto eol=lf
+*.png binary
