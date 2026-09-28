@@ -56,6 +56,7 @@ time travel). One command starts everything: `docker compose up -d --build`.
 | S-12 | Catalog admin (`/admin.html`): list, search and filter all products, with stats |
 | S-13 | "+ Add product": name, category, price, badge, description, and an emoji picker per category, with a live preview; the product is instantly buyable and its orders reach the dashboard |
 | S-14 | Admin-added products persist across restarts and can be deleted; seed products are protected |
+| S-16 | Reviews for admin-added products: set a rating and count by hand or generate realistic random ones, when adding or later |
 | S-15 | *(Phase 9)* Inventory: stock per product, decremented by orders and increased by restocks, with a forecasting and reorder dashboard (see Phases.md §2.0) |
 
 ### 6.2 Pipeline
@@ -71,7 +72,7 @@ time travel). One command starts everything: `docker compose up -d --build`.
 ### 6.3 Dashboard (`dashboard/`, http://localhost:8501)
 | ID | Requirement |
 |---|---|
-| D-1 | Live tab: KPIs (5-minute revenue and orders with deltas, AOV, 15-minute conversion, data freshness), revenue per minute by category, funnel, top products, revenue by country; auto-refresh |
+| D-1 | Live tab: KPIs (5-minute revenue and orders with deltas, AOV, 15-minute conversion, data freshness), revenue per minute by category (closed windows plus provisional open minutes, so a single order shows even in a quiet store), funnel, top products, revenue by country; auto-refresh |
 | D-2 | Every widget exposes its SQL and latency |
 | D-3 | Internals tab per table: snapshots, file counts and sizes, one-click `OPTIMIZE`, time-travel slider |
 | D-4 | SQL playground, read-only (`SELECT/WITH/SHOW/DESCRIBE/EXPLAIN` only), with examples |

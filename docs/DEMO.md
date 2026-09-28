@@ -80,7 +80,9 @@ Points worth mentioning:
 
 - **Data freshness** shows the end-to-end latency: now minus the newest event in Iceberg.
 - **Revenue per minute** comes from a *gold* table that Flink builds with 1-minute tumbling windows.
-  A window appears once the watermark passes its end, so it arrives about 65 s after the minute starts.
+  A window closes once the watermark passes its end. In a quiet store that waits for the *next* event,
+  so the latest minutes are shown **faded and dashed**, computed live from the raw orders until Flink
+  closes them. A good question to ask the audience is why.
 - Open any **🔍 SQL** to show the exact Trino query and its latency.
 
 Dark mode is a toggle in the sidebar, or the link http://localhost:8501/?theme=dark:

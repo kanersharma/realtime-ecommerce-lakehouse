@@ -75,7 +75,7 @@ flowchart LR
 | Produce | **FastAPI** + vanilla JS storefront | Real user events: product views, add-to-cart, checkout |
 | Ingest | **Apache Kafka 3.9** (KRaft, no ZooKeeper) | Durable, partitioned event log (3 partitions per topic) |
 | Process | **Apache Flink 1.20** (SQL) | Streaming ETL and windowed aggregation, exactly-once |
-| Table format | **Apache Iceberg 1.8** (REST catalog) | ACID tables, snapshots, schema evolution, time travel |
+| Table format | **Apache Iceberg 1.8** (REST catalog on Postgres) | ACID tables, snapshots, schema evolution, time travel |
 | Storage | **RustFS** (S3 API) | Object storage for Parquet data and Iceberg metadata |
 | Query | **Trino 470** | Distributed SQL over Iceberg |
 | Serve | **Streamlit** | Live dashboard, lakehouse explorer and SQL playground |
@@ -170,7 +170,7 @@ A FastAPI app serves a no-build bento-grid UI (plain HTML/CSS/JS with native `<d
 
 **Catalog admin** (`/admin.html`, or the 🗂️ Catalog button): browse all products and **add new ones**
 with a name, category, price, badge, description and an emoji "photo" from a per-category picker,
-with a live preview. New products are buyable immediately, and their orders flow to the dashboard like
+with a live preview, plus optional reviews (typed in, or 🎲 random). New products are buyable immediately, and their orders flow to the dashboard like
 any other. The catalog lives in the shop's SQLite database (seeded from `catalog/products.json`, kept
 in the `shop-data` volume), so added products survive restarts.
 
@@ -317,7 +317,7 @@ These are deliberate simplifications for a laptop demo, each with its production
 | Choice here | Why | Production path |
 |---|---|---|
 | Flink checkpoints kept in JobManager memory | No shared filesystem needed between containers | S3 checkpoint storage + HA JobManager (Kubernetes operator) |
-| Iceberg REST fixture on SQLite (WAL, 30 s busy timeout) | Zero extra services | Postgres-backed catalog, or Polaris / Lakekeeper / Nessie |
+| Iceberg REST fixture (a test server) on Postgres | Standard REST API, small footprint | Polaris / Lakekeeper / Nessie / Glue |
 | Single Kafka broker, RF=1 | Memory | 3+ brokers, RF=3, `min.insync.replicas=2` |
 | Manual compaction button | Makes the small-files problem visible | Scheduled `rewrite_data_files` + `expire_snapshots` + `remove_orphan_files` |
 | JSON on Kafka | Human-readable in Kafka UI | Avro / Protobuf + Schema Registry |
@@ -330,10 +330,11 @@ These are deliberate simplifications for a laptop demo, each with its production
 | Dashboard says "Waiting for data" for > 2 min | Check `docker compose logs flink-job` and the Flink UI → Exceptions tab |
 | `port is already allocated` | Another app (often Airflow on 8080) holds a port. Change the host side of `ports:` in `docker-compose.yml` |
 | Containers restart or Docker becomes unresponsive | Not enough memory. Give Docker ≥ 6 GB, stop other stacks, or remove `kafka-ui` |
-| `CommitStateUnknownException … SQLITE_BUSY` | Catalog lock contention. Keep the `busy_timeout` in `CATALOG_URI`, or move the catalog to Postgres |
+| `CommitStateUnknownException` in the Flink UI | Catalog database errors. The catalog must run on Postgres (it did on SQLite once and crash-looped) |
+| Latest minutes in the revenue chart look faded | Normal: those windows are still open (no newer events yet), so they're computed live from bronze and marked provisional |
 | Trino exits with code 137 | OOM-kill. Keep `trino/jvm.config` (fixed heap) and `mem_limit` together |
 | Changed `pipeline.sql` but nothing happens | The running job is kept. Cancel it in the Flink UI, then `docker compose run --rm flink-job` |
-| Revenue chart empty but KPIs work | Normal for the first ~65 s: a window emits only after the watermark passes its end |
+| Dashboard slowing down after an hour or two | Small files accumulate; press **🧹 Compact now** in the Internals tab |
 
 ## Roadmap ideas
 - [ ] Schema Registry + Avro, with a schema-evolution demo (`ALTER TABLE … ADD COLUMN` mid-stream)

@@ -32,7 +32,7 @@ end to end before making the final change (commit, push, or saying "done").** Co
    | `test_catalog.py` | catalog integrity; the 6 categories stay in sync across catalog, dashboard and shop UI |
    | `test_contract.py` | shop and simulator events have exactly the columns in `pipeline.sql` |
    | `test_shop_api.py` | every endpoint and payment method (card/UPI/COD), validation, price tampering, no card-data leaks |
-   | `test_catalog_api.py` | add/list/validate/persist/delete products; a new product can be bought |
+   | `test_catalog_api.py` | add/list/validate/persist/delete products, reviews rules; a new product can be bought |
    | `test_generator.py` | simulator funnel logic |
    | `test_dashboard.py` | dashboard via Streamlit `AppTest` with a fake Trino: KPIs, themes, waiting state, SQL guard |
    | `test_storefront_e2e.py` | real browser (Playwright + Edge): search, cart, all checkouts, server-down message, layout, catalog admin (add → view → buy, validation, delete) |
@@ -62,7 +62,8 @@ end to end before making the final change (commit, push, or saying "done").** Co
 | generator | ./generator | – | **opt-in**: `--profile simulator`; env `SESSIONS_PER_SEC` (default 20) |
 | rustfs | rustfs/rustfs:1.0.0 | 9000 (S3), 9001 (console) | creds `admin` / `password` |
 | s3-init | amazon/aws-cli | – | one-shot: creates bucket `warehouse` |
-| iceberg-rest | apache/iceberg-rest-fixture:1.8.1 | 8181 | JDBC catalog on SQLite at `/home/iceberg/catalog.db` (volume) |
+| postgres | postgres:16.4-alpine | – | database behind the Iceberg catalog (volume `catalog-db`) |
+| iceberg-rest | ./iceberg-rest (fixture 1.8.1 + Postgres JDBC driver) | 8181 | Iceberg REST catalog, JDBC on Postgres |
 | jobmanager / taskmanager | ./flink (lakehouse-flink:1.20) | 8081 | config via `FLINK_PROPERTIES` in the `x-flink` anchor |
 | flink-job | ./flink | – | one-shot: submits `pipeline.sql` via `sql-client.sh`, **skips if a job is already running**, exits 0 |
 | trino | trinodb/trino:470 | **8090**→8080 | catalog from `trino/catalog/lakehouse.properties`; heap pinned in `trino/jvm.config` |
@@ -95,7 +96,8 @@ The catalog name `lakehouse` and schema `shop` are the same in Flink and Trino. 
 ```bash
 docker compose up -d --build                  # start everything
 docker compose down -v                        # stop and wipe all data (Kafka, S3, catalog)
-docker compose up -d --build dashboard        # rebuild one service after editing it
+docker compose up -d --build --no-deps dashboard   # rebuild ONE service; without --no-deps compose also
+                                                   # recreates its dependencies (trino, iceberg-rest) and Flink restarts
 docker compose run --rm flink-job             # submit pipeline.sql (no-op if a job is already running)
 docker compose exec trino trino --catalog lakehouse --schema shop   # SQL shell
 .venv/Scripts/python -m pytest -rs           # ALL tests (see "Testing is mandatory" above)
@@ -145,10 +147,12 @@ To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
 ## Known gotchas (learned the hard way)
 - **MinIO images are no longer published** (`minio/minio`, `minio/mc` fail to pull as of 2025).
   That's why storage is RustFS and bucket creation uses `amazon/aws-cli`.
-- **REST fixture + in-memory SQLite** (the default) gives each pooled connection its own empty DB,
-  so you get "no such table: iceberg_tables" or "Failed to load table". Keep the file-backed `CATALOG_URI`.
-- **SQLITE_BUSY → `CommitStateUnknownException`**: the 4 Iceberg committers commit concurrently on
-  each checkpoint. `?journal_mode=WAL&busy_timeout=30000` on `CATALOG_URI` is required.
+- **Never put the Iceberg catalog on SQLite.** In-memory SQLite is per-connection (tables "vanish"), and
+  file SQLite fails concurrent commits with `SQLITE_BUSY_SNAPSHOT`, so Flink crash-loops. The catalog
+  runs on Postgres; `iceberg-rest/Dockerfile` adds the JDBC driver to the fixture.
+- **Windows don't close in a quiet store** (the watermark needs newer events). `REVENUE_SQL` unions gold
+  with open minutes from bronze. Keep that pattern for any new windowed chart.
+- **Trino sessions in tests must be `timezone="UTC"`**, or `localtimestamp` filters return nothing.
 - **YAML folded scalars (`>`)** keep newlines on more-indented lines, which breaks multi-line shell
   commands in `command:`. Keep each shell command on one line.
 - **Trino OOM-kill (exit 137)**: the image default heap is 80 % of container RAM, which leaves no native

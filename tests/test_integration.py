@@ -30,7 +30,8 @@ def stack():
     import httpx
     import trino
     conn = trino.dbapi.connect(host="localhost", port=TRINO_PORT, user="integration-test",
-                               catalog="lakehouse", schema="shop")
+                               catalog="lakehouse", schema="shop",
+                               timezone="UTC")  # like the dashboard: localtimestamp must be UTC
     return httpx.Client(base_url=SHOP, timeout=10), conn
 
 
@@ -88,6 +89,31 @@ def test_admin_added_product_flows_to_the_lakehouse(stack):
                    f"FROM orders WHERE session_id = '{session}'", [[pid, name, "Home", 24.68]])
     finally:  # keep the demo catalog clean; the order itself stays in the lakehouse
         assert http.delete(f"/api/products/{pid}").status_code == 204
+
+
+def dashboard_sql(name):
+    """A SQL constant from dashboard/app.py, so tests run exactly what the dashboard runs."""
+    import ast
+    from conftest import ROOT
+    tree = ast.parse((ROOT / "dashboard" / "app.py").read_text(encoding="utf-8"))
+    return next(n.value.value for n in tree.body
+                if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", None) == name)
+
+
+def test_a_single_order_shows_in_revenue_per_minute_without_later_traffic(stack):
+    """In a quiet store Flink's last window stays open (the watermark needs newer events), so the
+    chart must still show that minute, computed live from bronze orders."""
+    http, conn = stack
+    session = f"S-it{uuid.uuid4().hex[:12]}"
+    r = http.post("/api/checkout", json={
+        "user_id": f"W-it{uuid.uuid4().hex[:12]}", "session_id": session, "name": "Integration Test",
+        "country": "IN", "items": [{"product_id": "P002", "quantity": 1}], "payment": {"method": "cod"}})
+    assert r.status_code == 200, r.text
+    poll(conn, f"SELECT count(*) FROM orders WHERE session_id = '{session}'", [[1]])
+    (minute,) = query(conn, f"SELECT date_trunc('minute', event_time) FROM orders WHERE session_id = '{session}'")[0]
+    rows = query(conn, dashboard_sql("REVENUE_SQL"))
+    electronics = sum(rev for m, cat, rev, status in rows if m == minute and cat == "Electronics")
+    assert electronics >= 329.0, f"minute {minute} missing from the revenue chart: {rows[-6:]}"
 
 
 def test_dashboard_queries_run_on_real_trino(stack, monkeypatch):

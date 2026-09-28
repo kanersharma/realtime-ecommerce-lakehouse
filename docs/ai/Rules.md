@@ -52,6 +52,9 @@
   The admin UI's checks are only for speed; the server decides.
 - **R-CAT-5** Seed products can't be deleted (403). Tests that create products on the live stack MUST
   delete them afterwards, so the demo catalog stays clean.
+- **R-CAT-7** Reviews (rating + count) can be set only on admin-added products. Ratings have one decimal
+  and are 1.0–5.0 when there are reviews; 0 reviews means rating 0 ("No reviews yet"). The UI always
+  shows one decimal (4.0, not 4).
 - **R-CAT-6** Tests MUST NOT use the developer database: `conftest.shop_db` points `SHOP_DB` at a fresh
   temp file for every test.
 - **R-CAT-2** Exactly 6 categories, kept in sync with `CATEGORY_COLORS` (dashboard) and `CATS`
@@ -74,6 +77,10 @@
 - **R-SQL-2** Time filters use `localtimestamp` (the dashboard session is UTC). Charts show UTC.
 - **R-SQL-3** The SQL playground stays read-only (`SELECT/WITH/SHOW/DESCRIBE/EXPLAIN`). The only write
   in the dashboard is the explicit OPTIMIZE button.
+- **R-SQL-5** Charts built on windowed gold tables MUST also show the still-open windows (computed from
+  bronze, marked provisional), because windows don't close while the store is quiet.
+- **R-SQL-6** Test connections to Trino MUST use `timezone="UTC"`, like the dashboard. Otherwise
+  `localtimestamp` is local time, and "last N minutes" filters silently return nothing.
 - **R-SQL-4** Any new dashboard query MUST be exercised against real Trino
   (`test_dashboard_queries_run_on_real_trino`). The fake Trino accepts any SQL.
 
@@ -93,7 +100,9 @@
 - **R-OPS-1** In `docker-compose.yml`, keep each shell command in `command:` on one line (YAML
   folded scalars keep newlines on more-indented lines).
 - **R-OPS-2** Keep the stack under ~5 GB RAM. Trino heap (`jvm.config`) must stay well below its `mem_limit`.
-- **R-OPS-3** Keep `CATALOG_URI` file-backed with `journal_mode=WAL&busy_timeout=30000`.
+- **R-OPS-3** The Iceberg catalog MUST run on Postgres (`CATALOG_URI=jdbc:postgresql://…`). NEVER go
+  back to SQLite: its single-writer locking fails Flink's concurrent commits (`SQLITE_BUSY_SNAPSHOT`),
+  and the job crash-loops.
 - **R-OPS-4** Host ports: 8000 shop, 8081 Flink, 8088 Kafka UI, 8090 Trino, 8181 REST, 8501 dashboard,
   9000/9001 RustFS, 29092 Kafka. 8080 is avoided on purpose (usually taken).
 - **R-OPS-5** Files mounted into containers are LF-only (`.gitattributes`). Don't remove it.

@@ -65,7 +65,11 @@ def traffic(minutes, sessions_per_sec=2.0, stop=None, quiet=False):
         while time.time() < end and not (stop and stop.is_set()):
             tick = time.time()
             for _ in range(rng.randint(int(sessions_per_sec) - 1, int(sessions_per_sec) + 1)):
-                o, d = shopper(http, rng)
+                try:
+                    o, d = shopper(http, rng)
+                except httpx.TransportError:  # shop restarting: skip this session, keep going
+                    time.sleep(1)
+                    continue
                 orders, declined, sessions = orders + o, declined + d, sessions + 1
             if not quiet and sessions % 60 < 3:
                 print(f"  {sessions} sessions, {orders} orders, {declined} declined", flush=True)
@@ -138,6 +142,8 @@ def store_screenshots(browser):
     page.locator('#add-form [name="description"]').fill(
         "Wireless controller with hall-effect sticks, 40-hour battery and a satisfyingly clicky D-pad.")
     page.locator('.emoji-choice input[value="🎮"]').check(force=True)
+    page.locator('#add-form [name="rating"]').fill("4.7")
+    page.locator('#add-form [name="reviews"]').fill("1286")
     shoot(page, "admin-add")
     ctx.close()
 
@@ -156,7 +162,8 @@ def dashboard_screenshots(browser):
         page.goto(f"{DASHBOARD}/?theme={theme}")
         page.get_by_text("Revenue · last 5 min").wait_for(timeout=90_000)
         page.get_by_text("Top products").wait_for(timeout=90_000)
-        page.wait_for_timeout(4000)  # charts render after the data
+        page.locator(".vega-embed").nth(2).wait_for(timeout=90_000)  # revenue, funnel and country charts
+        page.wait_for_timeout(2500)  # let the chart animations settle
         shoot(page, f"dashboard-{theme}")
         if theme == "light":
             page.get_by_role("tab", name="🔬 Lakehouse Internals").click()

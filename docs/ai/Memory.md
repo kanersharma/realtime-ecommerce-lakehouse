@@ -17,6 +17,26 @@
 
 ## 2. Decision and incident log (newest first)
 
+### 2026-09-28 · "I can't see revenue per minute": two root causes
+- **1. The Flink job had crash-looped for 15+ minutes** (115 restarts). Every Iceberg commit failed with
+  `SQLITE_BUSY_SNAPSHOT`. In WAL mode a pooled connection with a stale read snapshot can't write, and
+  SQLite fails it immediately (`busy_timeout` doesn't help). Restarting the catalog only masked it.
+  **Now:** the REST catalog runs on **Postgres** (a thin image adds the JDBC driver; R-OPS-3). Under
+  the same 4-minute load: 0 restarts, sub-second checkpoints. The old SQLite catalog's tables weren't
+  migrated. They were recreated empty; old Parquet files remain in S3 as orphans.
+- **2. Windows don't close in a quiet store.** The watermark only advances with new events, so a single
+  real order's minute never reached gold until someone else shopped. **Now:** the revenue chart adds
+  provisional open minutes from bronze (R-SQL-5), with an integration test and a mutation check.
+- **Also found:** the integration test's Trino session wasn't UTC, so `localtimestamp` filters returned
+  nothing (R-SQL-6). `stars()` threw on ratings above 5 (`repeat(-1)`), caught by the e2e console guard.
+  A random-reviews test was flaky because whole ratings displayed as "4" instead of "4.0"; the UI now
+  always shows one decimal.
+- **Self-inflicted restarts:** `docker compose up -d --build dashboard` also rebuilt and recreated `trino`
+  and `iceberg-rest` (dependencies), so Flink lost the catalog for ~20 s and restarted (10 restores).
+  Use `--no-deps` to rebuild a single service. Flink recovers on its own, but it looks alarming in the counters.
+- **Watch:** small files grow about 2 per table per checkpoint, and after ~1 hour queries went from ~1 s
+  to 2.5 s. Scheduled compaction (Phases 2.5) is the fix. The Compact button is the manual one.
+
 ### 2026-09-28 · Catalog moved into the shop's SQLite database
 - **Why:** admin-added products must persist, and the next phase (inventory) needs transactional
   stock updates. A JSON file mounted read-only can't do either. SQLite is in the standard library,

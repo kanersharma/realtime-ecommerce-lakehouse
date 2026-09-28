@@ -73,6 +73,9 @@ tiles for friendliness.
 - **Card**: `with card("Title", "TAG"):` gives a bordered container with a heavy title and an ink tag.
 - **Charts**: `draw(alt.Chart(...))` gives transparent background, ink axes, recessive grid and a
   bottom legend. Bars have ink strokes (1.5–2.5 px); the funnel has direct value labels; tooltips everywhere.
+- **Revenue per minute** (tag `GOLD WINDOWS + LIVE`): closed minutes are solid; still-open minutes
+  (from bronze) are 40 % opacity with dashed outlines, explained by a caption. Axis labels use
+  `labelOverlap="greedy"` so they never collide.
 - **SQL disclosure**: `show_sql()` renders an expander "🔍 SQL · N ms · N rows" using `code()`.
 - **Dark mode**: sidebar toggle; the canvas data grid is inverted with `filter: invert(1) hue-rotate(180deg)`.
 
@@ -101,10 +104,12 @@ tiles for friendliness.
   page): emoji thumb on the category tint, mono id, name with a one-line description, category chip
   with the category colour as a thick bottom border, price, badge, rating ("No reviews yet" for new),
   Source ("Seed" or a yellow "Added" chip), and actions (**View** deep-links to `/?q=name`; 🗑️ only
-  on added products). A newly added row flashes yellow.
+  on added products). A newly added row flashes yellow. Added products also get a **⭐** action that
+  opens a small reviews dialog (manual values, 🎲 Random, No reviews, with a live star preview).
 - **Add dialog:** two columns (they stack below 1000 px). The form has fieldsets "1 · Details" (name,
   category, price, badge, description with a live counter) and "2 · Photo" (an emoji grid as a
-  radiogroup; the selected emoji turns yellow with a shadow; the choices follow the category). The
+  radiogroup; the selected emoji turns yellow with a shadow; the choices follow the category) and
+  "3 · Reviews" (optional rating and count, **🎲 Random reviews** for realistic values, **No reviews**). The
   **live preview** is a real store tile, so what you see is what the store shows. Errors appear in the
   pink box and clear as soon as you edit.
 

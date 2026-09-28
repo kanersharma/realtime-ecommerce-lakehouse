@@ -231,11 +231,27 @@ SELECT c.*, o.orders FROM c CROSS JOIN o
 """
 
 REVENUE_SQL = """
--- Gold table written by a Flink 1-minute tumbling window
-SELECT window_start AS minute, category, CAST(sum(revenue) AS double) AS revenue
-FROM revenue_per_minute
-WHERE window_start > localtimestamp - INTERVAL '30' MINUTE
-GROUP BY 1, 2
+-- Closed minutes: the gold table written by Flink's 1-minute tumbling windows.
+-- Open minutes: a window only closes when the watermark (newest event - 5 s) passes its end, and
+-- the watermark only moves when new events arrive. In a quiet store the latest minutes would never
+-- show, so they are computed live from the bronze orders table (committed every 10 s).
+WITH cutoff AS (
+  SELECT coalesce(max(window_end), TIMESTAMP '1970-01-01 00:00:00') AS t FROM revenue_per_minute
+), closed AS (
+  SELECT window_start AS minute, category, CAST(sum(revenue) AS double) AS revenue, 'closed' AS status
+  FROM revenue_per_minute
+  WHERE window_start > localtimestamp - INTERVAL '30' MINUTE
+  GROUP BY 1, 2
+), open_minutes AS (
+  SELECT date_trunc('minute', event_time) AS minute, category,
+         CAST(sum(total_amount) AS double) AS revenue, 'live' AS status
+  FROM orders CROSS JOIN cutoff
+  WHERE event_time >= cutoff.t AND event_time > localtimestamp - INTERVAL '30' MINUTE
+  GROUP BY 1, 2
+)
+SELECT * FROM closed
+UNION ALL
+SELECT * FROM open_minutes
 ORDER BY 1
 """
 
@@ -335,21 +351,27 @@ def live():
 
     st.write("")
     left, right = st.columns([2, 1], gap="large")
-    with left, card("Revenue per minute", "GOLD · 1-MIN WINDOWS"):
+    with left, card("Revenue per minute", "GOLD WINDOWS + LIVE"):
         rev, ms = query(REVENUE_SQL)
         if rev.empty:
-            st.caption("First 1-minute window closes ~65 s after data starts flowing "
-                       "(window end + 5 s watermark delay).")
+            st.caption("No orders in the last 30 minutes. Place one in the store and it appears here "
+                       "within about 10 s.")
         else:
             rev["time"] = pd.to_datetime(rev.minute).dt.strftime("%H:%M")
+            rev["window"] = rev.status.map({"closed": "closed (gold)", "live": "open (live, provisional)"})
             draw(alt.Chart(rev).mark_bar(stroke=M["ink"], strokeWidth=1.5).encode(
-                x=alt.X("time:O", title=None, axis=alt.Axis(labelAngle=0)),
+                x=alt.X("time:O", title=None, axis=alt.Axis(labelAngle=0, labelOverlap="greedy")),
                 y=alt.Y("revenue:Q", title="Revenue ($)", stack=True),
                 color=alt.Color("category:N", scale=alt.Scale(
                     domain=list(CATS), range=list(CATS.values()))),
                 order=alt.Order("category:N"),
-                tooltip=["time:O", "category:N", alt.Tooltip("revenue:Q", format="$,.0f")],
+                opacity=alt.condition(alt.datum.status == "live", alt.value(0.4), alt.value(1.0)),
+                strokeDash=alt.condition(alt.datum.status == "live", alt.value([4, 3]), alt.value([1, 0])),
+                tooltip=["time:O", "category:N", alt.Tooltip("revenue:Q", format="$,.0f"), "window:N"],
             ))
+            if (rev.status == "live").any():
+                st.caption("Faded, dashed bars are minutes Flink hasn't closed yet. The window closes "
+                           "once newer events move the watermark past it, and then the bar turns solid.")
         show_sql(REVENUE_SQL, ms, len(rev))
     with right, card("Funnel", "LAST 15 MIN"):
         steps = pd.DataFrame({

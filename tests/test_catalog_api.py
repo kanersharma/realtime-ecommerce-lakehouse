@@ -101,3 +101,46 @@ def test_deleted_id_is_not_reused_while_later_ids_exist(client):
     client.delete(f"/api/products/{first}")
     assert add(client, name="Studio Mic", emoji="🎙️").json()["id"] == "P051"
     assert second == "P050"
+
+
+# ------------------------------------------------ reviews
+def test_new_product_can_start_with_reviews(client):
+    p = add(client, rating=4.6, reviews=128).json()
+    assert (p["rating"], p["reviews"]) == (4.6, 128)
+    listed = {x["id"]: x for x in client.get("/api/products").json()}
+    assert (listed[p["id"]]["rating"], listed[p["id"]]["reviews"]) == (4.6, 128)
+
+
+@pytest.mark.parametrize("rating,reviews,detail", [
+    (4.55, 10, "1 decimal"),
+    (4.5, 0, "without reviews"),
+    (0, 10, "between 1.0 and 5.0"),
+    (0.5, 10, "between 1.0 and 5.0"),
+    (5.1, 10, None),                  # pydantic: le=5
+    (4.5, -1, None),                  # pydantic: ge=0
+    (4.5, 100_001, None),             # pydantic: le=100000
+])
+def test_invalid_reviews_are_rejected(client, rating, reviews, detail):
+    r = add(client, rating=rating, reviews=reviews)
+    assert r.status_code == 422, r.text
+    if detail:
+        assert detail in r.json()["detail"]
+    pid = add(client).json()["id"]
+    r = client.put(f"/api/products/{pid}/reviews", json={"rating": rating, "reviews": reviews})
+    assert r.status_code == 422
+    assert client.get("/api/products").json()[-1]["reviews"] == 0   # unchanged
+
+
+def test_set_and_clear_reviews_of_an_added_product(client):
+    pid = add(client).json()["id"]
+    r = client.put(f"/api/products/{pid}/reviews", json={"rating": 3.9, "reviews": 2048})
+    assert r.status_code == 200 and (r.json()["rating"], r.json()["reviews"]) == (3.9, 2048)
+    r = client.put(f"/api/products/{pid}/reviews", json={"rating": 0, "reviews": 0})
+    assert (r.json()["rating"], r.json()["reviews"]) == (0, 0)       # back to "No reviews yet"
+
+
+def test_seed_reviews_are_protected(client):
+    r = client.put("/api/products/P001/reviews", json={"rating": 1.0, "reviews": 1})
+    assert r.status_code == 403
+    assert client.get("/api/products").json()[0]["rating"] == 4.5
+    assert client.put("/api/products/P999/reviews", json={"rating": 4, "reviews": 1}).status_code == 404

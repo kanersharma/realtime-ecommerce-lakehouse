@@ -12,7 +12,7 @@ flowchart LR
     S -->|"produce JSON<br/>key = user_id"| K[("Kafka 3.9 (KRaft)<br/>topics: clicks · orders")]
     K --> F["Flink 1.20 SQL job<br/>'ecommerce-lakehouse'<br/>watermark 5 s · checkpoint 10 s"]
     F -->|"commit per checkpoint"| I[("Iceberg 1.8 tables<br/>Parquet+zstd on RustFS (S3)")]
-    RC["Iceberg REST catalog<br/>(SQLite, WAL)"] -. table metadata .- F
+    RC["Iceberg REST catalog<br/>(JDBC on Postgres)"] -. table metadata .- F
     RC -. table metadata .- T
     I --> T["Trino 470<br/>:8090"]
     T --> D["📊 Streamlit dashboard<br/>:8501"]
@@ -31,14 +31,15 @@ flowchart LR
 | `kafka-ui` | `kafbat/kafka-ui:v1.1.0` | 8088 | Browse topics and messages | ~300 MB |
 | `rustfs` | `rustfs/rustfs:1.0.0` | 9000 S3 / 9001 console | S3-compatible object store | ~150 MB |
 | `s3-init` | `amazon/aws-cli:2.37.4` | – | One-shot: creates bucket `warehouse` | – |
-| `iceberg-rest` | `apache/iceberg-rest-fixture:1.8.1` | 8181 | Iceberg REST catalog, JDBC on SQLite file | ~220 MB |
+| `postgres` | `postgres:16.4-alpine` | – | Database behind the Iceberg catalog (volume `catalog-db`) | ~40 MB |
+| `iceberg-rest` | `./iceberg-rest` (`apache/iceberg-rest-fixture:1.8.1` + Postgres JDBC driver) | 8181 | Iceberg REST catalog, JDBC catalog on Postgres | ~220 MB |
 | `jobmanager` / `taskmanager` | `./flink` (`lakehouse-flink:1.20`) | 8081 | Flink cluster (parallelism 2, 4 slots) | 1024 MB / 1536 MB |
 | `flink-job` | `./flink` | – | One-shot: submits `pipeline.sql` unless a job is already running | – |
 | `trino` | `trinodb/trino:470` | 8090 → 8080 | SQL over Iceberg | limit 1536 MB, heap 1 GB |
 | `dashboard` | `./dashboard` (Streamlit 1.41.1) | 8501 | Live dashboard | ~170 MB |
 
 Volumes: `shop-data` (the shop's catalog database, including admin-added products), `s3-data`
-(RustFS) and `catalog-data` (the Iceberg REST catalog's SQLite). Kafka has no volume, so `down`
+(RustFS) and `catalog-db` (Postgres behind the Iceberg REST catalog). Kafka has no volume, so `down`
 loses topics while Iceberg data and products survive. `down -v` wipes everything.
 
 ## 3. Request and event flow (checkout)
@@ -92,6 +93,7 @@ enforces it.
 | GET | `/api/products` | – | 200: catalog array (seed first, then admin-added; `seed` flag) | – |
 | POST | `/api/products` | `{name, category, price, emoji, description, badge?}` | 201: product with the next `P###` id | 409 duplicate name, 422 validation (price decimals, emoji not in the category's picker, name characters) |
 | DELETE | `/api/products/{id}` | – | 204 | 403 seed product, 404 unknown |
+| PUT | `/api/products/{id}/reviews` | `{rating, reviews}` | 200: product | 403 seed product, 404 unknown, 422 (rating 1.0–5.0 with one decimal when reviews > 0; 0/0 means no reviews) |
 | GET | `/api/catalog/options` | – | 200: `{categories, emoji: {category: [..]}, badges}` | – |
 | POST | `/api/events` | `{event_type, product_id, user_id, session_id}` | 202 | 404 unknown product, 422 validation |
 | POST | `/api/checkout` | `{user_id, session_id, name, country, items[{product_id, quantity 1–10}] (1–20), payment{method, card_number?, expiry?, cvc?, upi_id?}}` | 200: `{order_ref, total, lines, paid_with}` | 402 payment failed, 404 unknown product, 422 validation |
@@ -137,6 +139,14 @@ Readers see only whole snapshots. Kafka offsets are committed on the same checkp
 therefore ≈ the checkpoint interval (10 s) plus commit time. Gold windows appear ≈ 65 s after a minute
 starts (window end plus the 5 s watermark).
 
+**Open windows in a quiet store.** A window closes only when the watermark (newest event − 5 s) passes
+its end, and the watermark only moves when *new* events arrive. When shopping stops, the latest minute
+or two stay open indefinitely, so gold has no rows for them. The dashboard's `REVENUE_SQL` therefore
+unions **closed minutes from gold** with **open minutes computed from bronze `orders`** (everything at or
+after gold's `max(window_end)`). Open minutes are drawn faded and dashed and labelled provisional. They
+turn solid when the window closes. `test_a_single_order_shows_in_revenue_per_minute_without_later_traffic`
+guards this.
+
 On idle checkpoints Flink commits **empty snapshots** (no `added-records` in `summary`). Readers must
 tolerate that; see Rules R-SQL-1.
 
@@ -152,7 +162,8 @@ tolerate that; see Rules R-SQL-1.
 | Limit | Why | Production path |
 |---|---|---|
 | Flink checkpoints in JobManager memory | No shared FS between containers | S3 checkpoint storage + HA JobManager (K8s operator) |
-| REST catalog on SQLite (WAL, 30 s busy timeout) | Zero extra services | Postgres JDBC catalog, or Polaris / Lakekeeper / Nessie |
+| REST fixture (a test server) as the catalog, on Postgres | Small, standard REST API | A production catalog: Polaris / Lakekeeper / Nessie / Glue |
+| No scheduled compaction; files grow ~2 per table per checkpoint | Makes the small-files problem visible | Scheduled `rewrite_data_files` (roadmap 2.5) |
 | Single Kafka broker, RF = 1 | Memory | 3+ brokers, RF = 3, `min.insync.replicas = 2` |
 | Manual compaction button | Makes the small-files problem visible | Scheduled `rewrite_data_files`, `expire_snapshots`, `remove_orphan_files` |
 | JSON events | Human-readable in Kafka UI | Avro/Protobuf + Schema Registry |
@@ -165,7 +176,9 @@ tolerate that; see Rules R-SQL-1.
 | Store shows "Can't reach the Lakeshop server" | `shop` down or restarted under an open page | `docker compose ps shop` |
 | Dashboard "Waiting for data" | No tables yet, or a failing query | Expand "Details"; Flink UI → Exceptions |
 | Flink `restored` count keeps growing | Crash loop (catalog, S3, schema) | `curl localhost:8081/jobs/<jid>/exceptions` |
-| `CommitStateUnknownException` + `SQLITE_BUSY` | Catalog lock contention | `CATALOG_URI` must keep WAL + busy_timeout |
+| `CommitStateUnknownException` | Catalog database errors (historically `SQLITE_BUSY_SNAPSHOT` on SQLite) | `docker compose logs iceberg-rest`; the catalog must be on Postgres |
+| Revenue chart missing the latest minutes | Normal: open windows (see §7); they show faded from bronze | If *nothing* recent shows, check the Flink job state |
+| Dashboard queries slow down over hours | Small files accumulate | Compact in the Internals tab |
 | Trino exit 137 | OOM kill | `trino/jvm.config` heap vs `mem_limit` |
 | Docker API returns 500 | VM out of memory (often another stack running) | `docker stats`; stop other stacks |
 
@@ -177,6 +190,7 @@ catalog/         products.json (seed catalog: 48 products)
 generator/       generator.py (optional simulator)
 flink/           Dockerfile (connector jars), sql/pipeline.sql
 trino/           catalog/lakehouse.properties, jvm.config
+iceberg-rest/    Dockerfile (REST fixture + Postgres JDBC driver)
 dashboard/       app.py, .streamlit/config.toml
 tests/           pytest suite (see Rules R-TEST)
 scripts/demo.py  traffic + screenshots

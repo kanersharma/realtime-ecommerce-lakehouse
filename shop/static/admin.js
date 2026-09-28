@@ -6,6 +6,31 @@ let category = "All";
 let highlight = null;
 const NAME = /^[\p{L}\p{N}_][\p{L}\p{N}_ .,'&()+\/-]*$/u; // mirrors NewProduct.name in main.py
 
+// ------------------------------------------------ reviews (shared by the add and reviews dialogs)
+// Realistic random reviews: ratings skew high (3.5-5.0), counts spread from ~20 to ~3,000.
+function randomReviews() {
+  const rating = Math.min(5, Math.round((3.5 + 1.5 * Math.sqrt(Math.random())) * 10) / 10);
+  return { rating, reviews: Math.round(Math.exp(3 + Math.random() * 5)) };
+}
+
+function readReviews(f) {
+  return { rating: Number(f.rating.value) || 0, reviews: Number(f.reviews.value) || 0 };
+}
+
+function fillReviews(f, r) {
+  f.rating.value = r.reviews ? r.rating.toFixed(1) : "";
+  f.reviews.value = r.reviews || "";
+}
+
+// Mirrors check_reviews() in main.py.
+function reviewsProblem({ rating, reviews }) {
+  if (!Number.isInteger(reviews) || reviews < 0 || reviews > 100000) return "Number of reviews must be a whole number from 0 to 100,000.";
+  if (Math.round(rating * 10) !== rating * 10) return "Rating can have at most 1 decimal.";
+  if (reviews === 0 && rating !== 0) return "Add how many reviews there are, or clear the rating.";
+  if (reviews > 0 && (rating < 1 || rating > 5)) return "Rating must be between 1.0 and 5.0 when there are reviews.";
+  return null;
+}
+
 // ------------------------------------------------ list
 function row(p) {
   const c = CATS[p.category];
@@ -20,6 +45,7 @@ function row(p) {
     <td>${p.seed ? '<span class="muted">Seed</span>' : '<span class="chip chip-new">Added</span>'}</td>
     <td class="actions">
       <a class="btn small" href="/?q=${encodeURIComponent(p.name)}" aria-label="View ${esc(p.name)} in the store">View</a>
+      ${p.seed ? "" : `<button class="btn small" data-rev="${esc(p.id)}" aria-label="Reviews of ${esc(p.name)}">⭐</button>`}
       ${p.seed ? "" : `<button class="btn small" data-del="${esc(p.id)}" aria-label="Delete ${esc(p.name)}">🗑️</button>`}
     </td>
   </tr>`;
@@ -88,6 +114,7 @@ function draft() {
     emoji: f.querySelector('input[name="emoji"]:checked')?.value,
     description: f.description.value.trim(),
     badge: f.badge.value || null,
+    ...readReviews(f),
   };
 }
 
@@ -101,7 +128,7 @@ function renderPreview() {
       <div class="body">
         <span class="stripe" style="background:${c.color}"></span>
         <h3>${esc(d.name || "Product name")}</h3>
-        <p class="rating muted">No reviews yet</p>
+        <p class="rating${d.reviews ? "" : " muted"}">${esc(ratingText(d))}</p>
         <p class="desc">${esc(d.description || "Description")}</p>
         <div class="foot"><p class="price">${d.price > 0 ? money.format(d.price) : "$—"}</p><span class="btn small">+ Add</span></div>
       </div>
@@ -116,7 +143,7 @@ function problem(d) {
   if (Math.round(d.price * 100) !== d.price * 100) return "Price can have at most 2 decimals.";
   if (d.description.length < 10) return "Description needs at least 10 characters.";
   if (!d.emoji) return "Pick a photo.";
-  return null;
+  return reviewsProblem(d);
 }
 
 function openAdd() {
@@ -157,6 +184,44 @@ async function save(e) {
   }
 }
 
+// ------------------------------------------------ reviews of an existing (admin-added) product
+let reviewing = null;
+const revForm = () => $("#rev-form");
+
+function renderReviewPreview() {
+  $("#rev-preview").textContent = ratingText(readReviews(revForm()));
+}
+
+function openReviews(id) {
+  reviewing = items.find((x) => x.id === id);
+  $("#rev-product").textContent = `${reviewing.emoji} ${reviewing.name} · ${reviewing.id}`;
+  $("#rev-error").hidden = true;
+  fillReviews(revForm(), reviewing);
+  renderReviewPreview();
+  $("#rev-dlg").showModal();
+}
+
+async function saveReviews(e) {
+  e.preventDefault();
+  const r = readReviews(revForm());
+  const why = reviewsProblem(r);
+  if (why) {
+    $("#rev-error").textContent = why;
+    $("#rev-error").hidden = false;
+    return;
+  }
+  try {
+    const p = await api(`/api/products/${encodeURIComponent(reviewing.id)}/reviews`, r, "PUT");
+    $("#rev-dlg").close();
+    highlight = p.id;
+    await load();
+    toast(`Reviews saved: ${p.name} · ${ratingText(p)}`);
+  } catch (ex) {
+    $("#rev-error").textContent = ex.message;
+    $("#rev-error").hidden = false;
+  }
+}
+
 async function remove(id) {
   const p = items.find((x) => x.id === id);
   if (!confirm(`Delete ${p.name} (${p.id}) from the catalog? Past orders stay in the lakehouse.`)) return;
@@ -181,12 +246,20 @@ $("#cats").addEventListener("click", (e) => {
 $("#rows").addEventListener("click", (e) => {
   const del = e.target.closest("[data-del]");
   if (del) remove(del.dataset.del);
+  const rev = e.target.closest("[data-rev]");
+  if (rev) openReviews(rev.dataset.rev);
 });
 $("#add-btn").onclick = openAdd;
 $("#add-category").addEventListener("change", renderEmoji);
 form().addEventListener("input", () => { $("#add-error").hidden = true; renderPreview(); });
 form().addEventListener("change", renderPreview);
 form().addEventListener("submit", save);
+$("#add-random").onclick = () => { fillReviews(form(), randomReviews()); $("#add-error").hidden = true; renderPreview(); };
+$("#add-no-reviews").onclick = () => { fillReviews(form(), { rating: 0, reviews: 0 }); renderPreview(); };
+revForm().addEventListener("input", () => { $("#rev-error").hidden = true; renderReviewPreview(); });
+revForm().addEventListener("submit", saveReviews);
+$("#rev-random").onclick = () => { fillReviews(revForm(), randomReviews()); $("#rev-error").hidden = true; renderReviewPreview(); };
+$("#rev-clear").onclick = () => { fillReviews(revForm(), { rating: 0, reviews: 0 }); renderReviewPreview(); };
 document.querySelectorAll("dialog").forEach((d) => d.addEventListener("click", (e) => { if (e.target === d) d.close(); }));
 
 (async function init() {

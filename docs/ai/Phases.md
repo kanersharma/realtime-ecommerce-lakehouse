@@ -57,6 +57,10 @@ PRD, Architecture, Rules, Design, Phases and Memory in `docs/ai/`, indexed from 
   `/?q=…`; shared front-end helpers in `common.js`. The simulator reads the live catalog from the shop.
 - Tests: `test_catalog_api.py`, admin e2e flows (add → view in store → buy → events), and an
   integration test that orders an admin-added product and finds it in Iceberg.
+- **Reviews** for admin-added products (manual or 🎲 random, when adding or via ⭐ later).
+- **Reliability:** the Iceberg catalog moved from SQLite to **Postgres** (roadmap 2.6, done early), after
+  a crash loop from `SQLITE_BUSY_SNAPSHOT`. The revenue chart shows still-open minutes live from bronze,
+  so single orders appear in a quiet store.
 
 ## 2. Roadmap (not started)
 Ordered roughly by value. Each item lists acceptance criteria; per R-TEST, every item
@@ -142,9 +146,9 @@ days a refill takes (lead time) and how many days of stock we want to hold.
   `optimize`, `expire_snapshots` and `remove_orphan_files` per table.
 - ✅ Done when: the file count stays bounded over a 1-hour soak.
 
-### 2.6 Postgres-backed Iceberg catalog
-- Replace the SQLite fixture (e.g. with Lakekeeper or Polaris on Postgres).
-- ✅ Done when: several concurrent writers commit without `SQLITE_BUSY`, and data survives `down`/`up`.
+### 2.6 Production-grade catalog
+- The catalog already runs on Postgres (Phase 8). The remaining step is to replace the REST *fixture*
+  (a test server) with Lakekeeper or Polaris, adding auth and a UI.
 
 ### 2.7 Data-quality checks on gold tables
 - Soda or Great Expectations checks (no negative revenue, funnel monotonicity, freshness SLA) with

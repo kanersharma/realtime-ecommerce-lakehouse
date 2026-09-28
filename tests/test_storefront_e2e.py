@@ -399,3 +399,64 @@ def test_admin_has_no_horizontal_page_scroll(page, base_url, width):
     page.set_viewport_size({"width": width, "height": 900})
     open_admin(page, base_url)
     assert page.evaluate("document.documentElement.scrollWidth") <= width
+
+
+# ------------------------------------------------ reviews (admin-added products)
+def test_add_product_with_random_reviews(page, base_url):
+    open_admin(page, base_url)
+    fill_new_product(page)
+    page.locator("#add-random").click()
+    rating = float(page.locator('#add-form [name="rating"]').input_value())
+    reviews = int(page.locator('#add-form [name="reviews"]').input_value())
+    assert 3.5 <= rating <= 5.0 and 20 <= reviews <= 3000 and round(rating, 1) == rating
+    expect(page.locator("#preview")).to_contain_text(f"{rating:.1f} · {reviews:,}")  # always 1 decimal
+    page.locator("#save-btn").click()
+    expect(page.locator("#add-dlg")).to_be_hidden()
+    assert (shop.catalog()["P049"]["rating"], shop.catalog()["P049"]["reviews"]) == (rating, reviews)
+    page.locator('tr[data-id="P049"] a:has-text("View")').click()   # the store shows the rating
+    expect(page.locator(".product")).to_contain_text(f"{rating:.1f} · {reviews:,}")
+
+
+def test_add_product_with_manual_reviews_and_validation(page, base_url):
+    open_admin(page, base_url)
+    fill_new_product(page)
+    page.locator('#add-form [name="rating"]').fill("4.7")
+    page.locator("#save-btn").click()                                # rating without a count
+    expect(page.locator("#add-error")).to_contain_text("Add how many reviews")
+    page.locator('#add-form [name="reviews"]').fill("312")
+    page.locator("#save-btn").click()
+    expect(page.locator("#add-dlg")).to_be_hidden()
+    assert (shop.catalog()["P049"]["rating"], shop.catalog()["P049"]["reviews"]) == (4.7, 312)
+
+
+def test_whole_number_ratings_show_one_decimal(page, base_url):
+    import httpx
+    httpx.post(f"{base_url}/api/products", json={**NEW, "price": 49.99, "rating": 5.0, "reviews": 7})
+    open_admin(page, base_url)
+    expect(page.locator('tr[data-id="P049"]')).to_contain_text("5.0 · 7")
+
+
+def test_edit_reviews_of_an_added_product(page, base_url):
+    import httpx
+    assert httpx.post(f"{base_url}/api/products", json={**NEW, "price": 49.99}).status_code == 201
+    open_admin(page, base_url)
+    expect(page.locator("[data-rev]")).to_have_count(1)             # seed products keep curated reviews
+    expect(page.locator('tr[data-id="P049"]')).to_contain_text("No reviews yet")
+    page.locator('[data-rev="P049"]').click()
+    expect(page.locator("#rev-product")).to_contain_text("Game Controller · P049")
+    page.locator('#rev-form [name="rating"]').fill("6")
+    page.locator('#rev-form [name="reviews"]').fill("10")
+    page.locator("#rev-save").click()
+    expect(page.locator("#rev-error")).to_contain_text("between 1.0 and 5.0")
+    page.locator('#rev-form [name="rating"]').fill("4.2")
+    expect(page.locator("#rev-error")).to_be_hidden()
+    expect(page.locator("#rev-preview")).to_contain_text("4.2 · 10")
+    page.locator("#rev-save").click()
+    expect(page.locator("#rev-dlg")).to_be_hidden()
+    expect(page.locator("#toast")).to_contain_text("Reviews saved")
+    expect(page.locator('tr[data-id="P049"]')).to_contain_text("4.2 · 10")
+    page.locator('[data-rev="P049"]').click()                        # clear them again
+    page.locator("#rev-clear").click()
+    page.locator("#rev-save").click()
+    expect(page.locator('tr[data-id="P049"]')).to_contain_text("No reviews yet")
+

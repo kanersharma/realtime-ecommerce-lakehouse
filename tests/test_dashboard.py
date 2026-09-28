@@ -41,8 +41,9 @@ class FakeTrino:
         if "WITH c AS" in sql:
             return ["sessions", "page_views", "add_to_carts", "orders"], [(6120, 18240, 4560, 1812)]
         if "revenue_per_minute" in sql and "GROUP BY 1, 2" in sql:
-            return ["minute", "category", "revenue"], [(now - timedelta(minutes=m), c, rng.uniform(800, 6000))
-                                                       for m in range(10, 0, -1) for c in CATS]
+            return ["minute", "category", "revenue", "status"], [
+                (now - timedelta(minutes=m), c, rng.uniform(800, 6000), "live" if m <= 2 else "closed")
+                for m in range(10, 0, -1) for c in CATS]
         if "product_name" in sql and "GROUP BY" in sql:
             return ["product_name", "category", "units", "revenue"], [("4K Monitor", "Electronics", 61, 20069.0)]
         if "country" in sql and "GROUP BY" in sql:
@@ -86,6 +87,12 @@ def test_live_tab_renders_kpis(fake):
     assert metrics["Conversion · 15 min"] == "29.6%"
     assert metrics["Data freshness"] == "14 s"
     assert len(at.tabs) == 3
+
+
+def test_open_minutes_are_marked_provisional(fake):
+    fake()
+    at = run()
+    assert any("hasn't closed yet" in c.value for c in at.caption)
 
 
 def test_every_query_targets_the_lakehouse(fake):

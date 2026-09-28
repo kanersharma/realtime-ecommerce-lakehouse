@@ -212,6 +212,8 @@ tr.flash { animation: flash 2.4s ease-out; }
 .preview .product { cursor: default; }
 .preview .product:hover { transform: none; box-shadow: var(--shadow); }
 .preview .desc { margin: 0; font-size: .9rem; color: var(--muted); }
+.small-modal { max-width: min(520px, calc(100vw - 32px)); }
+.rev-preview { font-size: 1.1rem; margin: 0; }
 
 @media (max-width: 1000px) {
   .admin .stats .stat-total, .admin .stats .stat-price, .admin .stats .stat-new { grid-column: span 2; }

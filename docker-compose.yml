@@ -109,10 +109,26 @@ services:
       "until aws --endpoint-url http://rustfs:9000 s3 ls > /dev/null 2>&1; do sleep 1; done;
        aws --endpoint-url http://rustfs:9000 s3 mb s3://warehouse || true"
 
+  # Iceberg catalog metadata ("which metadata file is current" per table) lives in Postgres.
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_USER: iceberg
+      POSTGRES_PASSWORD: iceberg
+      POSTGRES_DB: iceberg
+    volumes: [catalog-db:/var/lib/postgresql/data]
+    healthcheck:
+      test: pg_isready -U iceberg -d iceberg
+      interval: 5s
+      retries: 30
+
   iceberg-rest:
-    image: apache/iceberg-rest-fixture:1.8.1
+    build: ./iceberg-rest  # apache/iceberg-rest-fixture:1.8.1 + Postgres JDBC driver
+    image: lakehouse-iceberg-rest:1.8.1
     ports: ["8181:8181"]
-    depends_on: { s3-init: { condition: service_completed_successfully } }
+    depends_on:
+      s3-init: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
     environment:
       AWS_ACCESS_KEY_ID: admin
       AWS_SECRET_ACCESS_KEY: password
@@ -121,13 +137,11 @@ services:
       CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
       CATALOG_S3_ENDPOINT: http://rustfs:9000
       CATALOG_S3_PATH__STYLE__ACCESS: "true"
-      # File-backed SQLite: the default in-memory DB is per-connection, so pooled
-      # connections would each see an empty catalog. The volume keeps tables across restarts.
-      # WAL + busy_timeout: the 4 Flink committers commit concurrently on every checkpoint;
-      # without them SQLite's single-writer lock fails commits with SQLITE_BUSY.
-      # ponytail: SQLite serializes all commits; use a Postgres-backed catalog for many writers.
-      CATALOG_URI: jdbc:sqlite:/home/iceberg/catalog.db?journal_mode=WAL&busy_timeout=30000
-    volumes: [catalog-data:/home/iceberg]
+      # JDBC catalog on Postgres: concurrent commits from Flink's 4 committers are safe.
+      # (SQLite failed them with SQLITE_BUSY_SNAPSHOT, see docs/ai/Memory.md.)
+      CATALOG_URI: jdbc:postgresql://postgres:5432/iceberg
+      CATALOG_JDBC_USER: iceberg
+      CATALOG_JDBC_PASSWORD: iceberg
 
   # ---------- Processing ----------
   jobmanager:
@@ -179,4 +193,4 @@ services:
 volumes:
   shop-data:
   s3-data:
-  catalog-data:
+  catalog-db:

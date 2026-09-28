@@ -3,6 +3,7 @@
   GET    /api/products          catalog (seeded from catalog/products.json, plus products added in /admin)
   POST   /api/products          add a product (admin)
   DELETE /api/products/{id}     remove an admin-added product (seed products are protected)
+  PUT    /api/products/{id}/reviews   set rating + review count of an admin-added product
   GET    /api/catalog/options   categories, allowed emoji per category, badges (for the admin form)
   POST   /api/events            page_view | add_to_cart            -> topic `clicks`
   POST   /api/checkout          fake payment, one order per line   -> topic `orders`
@@ -124,6 +125,11 @@ class Payment(BaseModel):
     upi_id: Optional[str] = None
 
 
+class Reviews(BaseModel):
+    rating: float = Field(default=0, ge=0, le=5)
+    reviews: int = Field(default=0, ge=0, le=100_000)
+
+
 class NewProduct(BaseModel):
     name: str = Field(min_length=2, max_length=60, pattern=r"^[\w][\w .,'&()+/-]*$")
     category: Literal[tuple(CATEGORIES)]
@@ -131,6 +137,8 @@ class NewProduct(BaseModel):
     emoji: str
     description: str = Field(min_length=10, max_length=400)
     badge: Optional[Literal[tuple(BADGES)]] = None
+    rating: float = Field(default=0, ge=0, le=5)          # optional starting reviews (manual or random
+    reviews: int = Field(default=0, ge=0, le=100_000)     # in the admin); 0/0 shows "No reviews yet"
 
     @field_validator("name", "description", mode="before")
     @classmethod
@@ -156,6 +164,26 @@ def product(product_id):
     return as_product(row)
 
 
+def check_reviews(rating, reviews):
+    """A rating needs reviews and vice versa; ratings have one decimal, like the seed data."""
+    if round(rating, 1) != rating:
+        raise HTTPException(422, "Rating can have at most 1 decimal.")
+    if reviews == 0 and rating != 0:
+        raise HTTPException(422, "A product without reviews can't have a rating.")
+    if reviews > 0 and rating < 1:
+        raise HTTPException(422, "Rating must be between 1.0 and 5.0 when there are reviews.")
+
+
+def set_reviews(product_id, r: Reviews):
+    p = product(product_id)
+    if p["seed"]:
+        raise HTTPException(403, "Seed products keep their curated reviews.")
+    check_reviews(r.rating, r.reviews)
+    with db() as con:
+        con.execute("UPDATE products SET rating = ?, reviews = ? WHERE id = ?", (r.rating, r.reviews, product_id))
+    return product(product_id)
+
+
 def create_product(new: NewProduct, at):
     """Validate beyond the model (money precision, emoji list, unique name) and insert -> product."""
     name = new.name
@@ -163,14 +191,16 @@ def create_product(new: NewProduct, at):
         raise HTTPException(422, "Price can have at most 2 decimals.")
     if new.emoji not in EMOJI[new.category]:
         raise HTTPException(422, f"Pick an emoji from the {new.category} set.")
+    check_reviews(new.rating, new.reviews)
     with db() as con:
         if con.execute("SELECT 1 FROM products WHERE lower(name) = lower(?)", (name,)).fetchone():
             raise HTTPException(409, f"A product called “{name}” already exists.")
         last = con.execute("SELECT max(CAST(substr(id, 2) AS INTEGER)) FROM products").fetchone()[0] or 0
         pid = f"P{last + 1:03d}"
-        con.execute("INSERT INTO products (id, name, category, price, emoji, description, badge, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (pid, name, new.category, new.price, new.emoji, new.description, new.badge, ts(at)))
+        con.execute("INSERT INTO products (id, name, category, price, emoji, description, rating, reviews, "
+                    "badge, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (pid, name, new.category, new.price, new.emoji, new.description, new.rating, new.reviews,
+                     new.badge, ts(at)))
     return product(pid)
 
 
@@ -261,6 +291,11 @@ def add_product(new: NewProduct):
 def remove_product(product_id: str):
     delete_product(product_id)
     return Response(status_code=204)
+
+
+@app.put("/api/products/{product_id}/reviews")
+def update_reviews(product_id: str, r: Reviews):
+    return set_reviews(product_id, r)
 
 
 @app.get("/api/catalog/options")

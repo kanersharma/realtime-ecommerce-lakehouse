@@ -89,6 +89,17 @@
           <legend>2 · Photo</legend>
           <div class="emoji-grid" id="emoji-grid" role="radiogroup" aria-label="Product emoji"></div>
         </fieldset>
+        <fieldset>
+          <legend>3 · Reviews <span class="muted small-note">optional</span></legend>
+          <div class="row">
+            <label>Rating (1–5) <input name="rating" type="number" inputmode="decimal" step="0.1" min="1" max="5" placeholder="4.5"></label>
+            <label>Number of reviews <input name="reviews" type="number" inputmode="numeric" step="1" min="0" max="100000" placeholder="0"></label>
+          </div>
+          <div class="row">
+            <button type="button" class="btn small" id="add-random">🎲 Random reviews</button>
+            <button type="button" class="btn small" id="add-no-reviews">No reviews</button>
+          </div>
+        </fieldset>
         <p class="error" id="add-error" role="alert" hidden></p>
         <button class="btn btn-pink wide" type="submit" id="save-btn">Add to catalog</button>
       </form>
@@ -98,6 +109,29 @@
         <p class="muted small-note">This is how it will look in the store.</p>
       </aside>
     </div>
+  </dialog>
+
+  <!-- Reviews of an admin-added product -->
+  <dialog id="rev-dlg" class="modal small-modal" aria-labelledby="rev-title">
+    <form method="dialog"><button class="close" aria-label="Close">✕</button></form>
+    <form id="rev-form" class="checkout" novalidate>
+      <h2 id="rev-title">Reviews</h2>
+      <p class="muted" id="rev-product"></p>
+      <fieldset>
+        <legend>Rating</legend>
+        <div class="row">
+            <label>Rating (1–5) <input name="rating" type="number" inputmode="decimal" step="0.1" min="1" max="5" placeholder="4.5"></label>
+            <label>Number of reviews <input name="reviews" type="number" inputmode="numeric" step="1" min="0" max="100000" placeholder="0"></label>
+          </div>
+        <p class="rating rev-preview" id="rev-preview"></p>
+        <div class="row">
+          <button type="button" class="btn small" id="rev-random">🎲 Random</button>
+          <button type="button" class="btn small" id="rev-clear">No reviews</button>
+        </div>
+      </fieldset>
+      <p class="error" id="rev-error" role="alert" hidden></p>
+      <button class="btn btn-pink wide" type="submit" id="rev-save">Save reviews</button>
+    </form>
   </dialog>
 
   <div id="toast" role="status" aria-live="polite"></div>

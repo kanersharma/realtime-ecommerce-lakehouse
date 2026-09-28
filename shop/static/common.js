@@ -44,9 +44,12 @@ function toast(msg) {
   toast.timer = setTimeout(() => t.classList.remove("show"), 2200);
 }
 
-function stars(r) { return "★".repeat(Math.round(r)) + "☆".repeat(5 - Math.round(r)); }
+function stars(r) {
+  const n = Math.max(0, Math.min(5, Math.round(r) || 0)); // clamp: a typed "6" must not throw
+  return "★".repeat(n) + "☆".repeat(5 - n);
+}
 
 // New (admin-added) products have no reviews yet.
 function ratingText(p) {
-  return p.reviews ? `${stars(p.rating)}  ${p.rating} · ${p.reviews.toLocaleString()}` : "No reviews yet";
+  return p.reviews ? `${stars(p.rating)}  ${Number(p.rating).toFixed(1)} · ${p.reviews.toLocaleString()}` : "No reviews yet";
 }
