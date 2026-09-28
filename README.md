@@ -8,8 +8,29 @@ exactly-once Apache Iceberg tables on S3-compatible storage. Trino queries those
 dashboard shows revenue, the conversion funnel and top products, plus the lakehouse internals
 (snapshots, small files, compaction, time travel) that usually stay hidden.
 
-<!-- Add a screenshot: save the dashboard (http://localhost:8501) as docs/dashboard.png, then uncomment:
-![Dashboard](docs/dashboard.png) -->
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/store-home.png" alt="Lakeshop storefront"><br><sub><b>🛒 Lakeshop</b>: shop here, every click is an event</sub></td>
+    <td width="50%"><img src="docs/screenshots/dashboard-light.png" alt="Live dashboard"><br><sub><b>📊 Dashboard</b>: the same events, about 15 s later, from Iceberg</sub></td>
+  </tr>
+</table>
+
+**▶ Want the guided version?** [docs/DEMO.md](docs/DEMO.md) is a 10-minute click-by-click demo with screenshots.
+
+---
+
+## Screenshots
+
+| Browse (bento grid) | Product | Cart |
+|---|---|---|
+| ![Products](docs/screenshots/store-products.png) | ![Product](docs/screenshots/store-product.png) | ![Cart](docs/screenshots/store-cart.png) |
+| **Test-mode checkout** | **Declined card: no order event** | **Order placed** |
+| ![Checkout](docs/screenshots/store-checkout.png) | ![Declined](docs/screenshots/store-declined.png) | ![Success](docs/screenshots/store-success.png) |
+| **Dashboard, dark mode** | **Lakehouse internals** | **SQL playground** |
+| ![Dark](docs/screenshots/dashboard-dark.png) | ![Internals](docs/screenshots/dashboard-internals.png) | ![SQL](docs/screenshots/dashboard-sql.png) |
+
+Regenerate them any time with `.venv/Scripts/python scripts/demo.py` (it sends real shopper traffic
+through the store, then captures both apps).
 
 ---
 
@@ -215,7 +236,7 @@ kafka-console-consumer --bootstrap-server localhost:29092 --topic orders
 
 ```sql
 -- Snapshot history of a table (one row per Flink checkpoint)
-SELECT committed_at, operation, summary['added-records'] FROM "orders$snapshots" ORDER BY 1 DESC;
+SELECT committed_at, operation, element_at(summary, 'added-records') FROM "orders$snapshots" ORDER BY 1 DESC;
 
 -- Time travel by timestamp
 SELECT count(*) FROM orders FOR TIMESTAMP AS OF (current_timestamp - INTERVAL '5' MINUTE);
@@ -246,6 +267,8 @@ ALTER TABLE orders EXECUTE optimize;
 ├── dashboard/
 │   └── app.py                  # Streamlit app
 ├── tests/                      # pytest suite: unit, contract, API, dashboard, browser e2e, integration
+├── scripts/demo.py             # send shopper traffic through the store + capture screenshots
+├── docs/                       # DEMO.md walkthrough + screenshots/
 ├── requirements-dev.txt        # test tooling
 ├── CLAUDE.md                   # context for AI coding assistants (incl. the mandatory testing workflow)
 └── README.md

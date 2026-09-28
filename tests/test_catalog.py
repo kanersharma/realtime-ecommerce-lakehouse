@@ -20,6 +20,12 @@ def test_products_are_complete_and_unique():
         assert p.get("badge") in (None, "Bestseller", "New", "Deal")
 
 
+def test_emoji_render_on_windows_10():
+    # Windows 10's Segoe UI Emoji stops at Emoji 12; newer ones (e.g. 🪴 U+1FAB4) render as empty boxes.
+    for p in PRODUCTS:
+        assert all(ord(ch) < 0x1FA70 for ch in p["emoji"]), f"{p['id']} {p['emoji']} is too new"
+
+
 def test_every_category_has_products():
     assert {p["category"] for p in PRODUCTS} == CATEGORIES
 

@@ -411,10 +411,11 @@ FROM "{table}$files"
 """
         files, files_ms = query(files_sql)
         snaps_sql = f"""
+-- element_at, not summary['key']: Flink's empty commits (idle checkpoints) lack these keys
 SELECT committed_at, snapshot_id, operation,
-       CAST(summary['added-records']    AS bigint) AS added_records,
-       CAST(summary['added-data-files'] AS bigint) AS added_files,
-       CAST(summary['total-data-files'] AS bigint) AS total_files
+       CAST(coalesce(element_at(summary, 'added-records'), '0')    AS bigint) AS added_records,
+       CAST(coalesce(element_at(summary, 'added-data-files'), '0') AS bigint) AS added_files,
+       CAST(element_at(summary, 'total-data-files')                AS bigint) AS total_files
 FROM "{table}$snapshots"
 ORDER BY committed_at DESC
 LIMIT 200
@@ -448,9 +449,9 @@ LIMIT 200
         if not snaps.empty:
             draw(alt.Chart(snaps).mark_line(color=PINK, strokeWidth=3, point=alt.OverlayMarkDef(
                     fill=PINK, stroke=M["ink"], strokeWidth=1.5, size=60)).encode(
-                x=alt.X("committed_at:T", title=None),
+                x=alt.X("committed_at:T", title=None, scale=alt.Scale(type="utc")),  # UTC like the rest of the page
                 y=alt.Y("added_records:Q", title="Records added"),
-                tooltip=[alt.Tooltip("committed_at:T", format="%H:%M:%S"), "operation", "added_records", "added_files"],
+                tooltip=[alt.Tooltip("committed_at:T", format="%H:%M:%S", formatType="utc"), "operation", "added_records", "added_files"],
             ), height=240)
         st.dataframe(snaps.astype({"snapshot_id": str}), hide_index=True, use_container_width=True)  # ids, not numbers
         show_sql(snaps_sql, snaps_ms, len(snaps))

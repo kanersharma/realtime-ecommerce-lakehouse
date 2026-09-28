@@ -247,12 +247,15 @@ $("#cart-lines").addEventListener("click", (e) => {
 });
 $("#to-checkout").onclick = openCheckout;
 $("#co-form").addEventListener("change", syncMethod);
+// a stale payment error disappears as soon as the shopper edits the form
+$("#co-form").addEventListener("input", () => ($("#co-error").hidden = true));
 $("#co-form").addEventListener("submit", pay);
 $("#fill-test").onclick = () => {
   const f = $("#co-form");
   f.demo_card.value = "4242 4242 4242 4242";
   f.demo_exp.value = "12/30";
   f.demo_cvc.value = "123";
+  $("#co-error").hidden = true;
 };
 // close dialogs when the backdrop is clicked
 document.querySelectorAll("dialog").forEach((d) => d.addEventListener("click", (e) => { if (e.target === d) d.close(); }));

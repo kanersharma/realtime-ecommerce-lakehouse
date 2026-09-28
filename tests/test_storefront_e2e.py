@@ -228,6 +228,8 @@ def test_failed_card_keeps_cart_and_emits_no_orders(page, card, message):
     expect(page.locator("#co-error")).to_contain_text(message, ignore_case=True)
     expect(page.locator("#cart-count")).to_have_text("1")
     assert sent("orders") == []
+    page.locator("#fill-test").click()                 # fixing the card clears the stale error
+    expect(page.locator("#co-error")).to_be_hidden()
 
 
 def test_name_is_required(page):

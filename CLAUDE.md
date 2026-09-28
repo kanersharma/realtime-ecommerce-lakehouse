@@ -144,6 +144,10 @@ To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
   After bumping `streamlit` in `requirements.txt`, open the dashboard and check the cards, tabs and KPI tiles.
 - **`st.code` / ```` ```sql ```` fences show `[object Object]`** after a fragment re-run (Streamlit 1.41
   syntax-highlighter bug). Use the `code()` helper in `app.py`, which renders a plain fence without a language.
+- **Iceberg snapshot `summary` keys are optional.** Flink commits *empty* snapshots on idle checkpoints,
+  and those have no `added-records` / `added-data-files`. `summary['key']` then fails the whole query,
+  so always use `element_at(summary, 'key')`. The fake Trino in unit tests can't catch this; the
+  integration test `test_dashboard_queries_run_on_real_trino` can.
 - **"Failed to fetch" in the store** means the browser got no response at all (the shop server is down or
   was restarted under an open page), not an API error. `app.js` turns it into a readable message. Check
   `docker compose ps shop` first.

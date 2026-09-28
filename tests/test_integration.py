@@ -70,6 +70,32 @@ def test_a_real_order_reaches_the_lakehouse(stack):
                f"FROM orders WHERE session_id = '{session}'", [["P021", 3, 144.0, "JP", "cod"]])
 
 
+def test_dashboard_queries_run_on_real_trino(stack, monkeypatch):
+    """Every dashboard query must be valid on real Trino and real Iceberg metadata.
+
+    test_dashboard.py's fake Trino accepts any SQL; this caught `summary['added-records']` failing on
+    Flink's empty commits, which only exist in real snapshot history.
+    """
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
+    from conftest import ROOT
+
+    monkeypatch.setenv("TRINO_HOST", "localhost")
+    monkeypatch.setenv("TRINO_PORT", str(TRINO_PORT))
+    st.cache_resource.clear()
+    at = AppTest.from_file(str(ROOT / "dashboard" / "app.py"), default_timeout=120).run()
+
+    def problems():
+        return [i.value for i in at.info if "Waiting for data" in i.value] + [e.value for e in at.error]
+
+    assert not at.exception
+    assert problems() == [], [m.value for m in at.markdown if m.value.startswith("```\nTrino")]
+    assert {"Revenue · last 5 min", "Live data files", "Records"} <= {m.label for m in at.metric}
+    for table in ("orders", "clicks", "revenue_per_minute", "funnel_per_minute"):
+        next(s for s in at.selectbox if s.label == "Table").set_value(table).run()
+        assert not at.exception and problems() == [], table
+
+
 def test_declined_payment_never_reaches_the_lakehouse(stack):
     http, conn = stack
     user, session = f"W-it{uuid.uuid4().hex[:12]}", f"S-it{uuid.uuid4().hex[:12]}"

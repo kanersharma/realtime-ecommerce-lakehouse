@@ -21,7 +21,7 @@
    "description": "True HEPA filter for rooms up to 40 m², with an auto mode that reacts to air quality and a whisper-quiet night setting."},
   {"id": "P011", "name": "Desk Lamp", "category": "Home", "price": 29.99, "emoji": "💡", "rating": 4.3, "reviews": 845,
    "description": "Flicker-free LED arm lamp with five colour temperatures and a USB port in the base for your phone."},
-  {"id": "P019", "name": "Ceramic Plant Pot", "category": "Home", "price": 24.00, "emoji": "🪴", "rating": 4.8, "reviews": 212, "badge": "New",
+  {"id": "P019", "name": "Ceramic Plant Pot", "category": "Home", "price": 24.00, "emoji": "🌵", "rating": 4.8, "reviews": 212, "badge": "New",
    "description": "Hand-glazed stoneware pot with drainage and a bamboo saucer. The plant is sold separately, unfortunately."},
   {"id": "P012", "name": "Yoga Mat", "category": "Sports", "price": 25.00, "emoji": "🧘", "rating": 4.4, "reviews": 1502,
    "description": "6 mm natural-rubber mat with a grippy top layer and alignment lines, so your downward dog stays pointed down."},
