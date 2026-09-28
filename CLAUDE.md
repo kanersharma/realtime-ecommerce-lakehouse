@@ -67,6 +67,10 @@ To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
   windows produces updates and would need an upsert-enabled Iceberg v2 table with a primary key.
 - The dashboard is read-only, apart from the explicit OPTIMIZE button. The SQL playground only allows
   `SELECT/WITH/SHOW/DESCRIBE/EXPLAIN`.
+- **UI style is neo-brutalist**: base colors in `dashboard/.streamlit/config.toml`, borders, shadows and
+  fonts in the `CSS` constant at the top of `app.py`. Put charts inside `with card(title, tag):` and render
+  them with `draw(altair_chart)` so they share styling. `CATEGORY_COLORS` is a fixed, colorblind-validated
+  mapping, so don't let colors cycle by position.
 - Deliberate shortcuts are marked with `ponytail:` comments that name the limit and the upgrade path.
 - Keep the stack under ~5 GB RAM (see memory settings in compose). Many users run it on 8–16 GB laptops.
 
@@ -83,6 +87,9 @@ To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
   headroom, so `OPTIMIZE` gets the container killed. `trino/jvm.config` pins `-Xmx1G` inside a `mem_limit: 1536m`.
 - **Duplicate Flink jobs**: `docker compose up` re-runs exited one-shot containers. `flink-job` checks
   `/jobs/overview` before submitting. Keep that guard.
+- **Streamlit upgrades can break the styling**: the CSS targets `data-testid` attributes
+  (`stMetric`, `stColumn`, `stVerticalBlockBorderWrapper`, …), which Streamlit renames between versions.
+  After bumping `streamlit` in `requirements.txt`, open the dashboard and check the cards, tabs and KPI tiles.
 - **Port 8080** is commonly taken (Airflow), so Trino is published on 8090.
 - Flink's first checkpoint can fail with `UnknownHostException` if containers start in the wrong order.
   The fixed-delay restart strategy recovers on its own.

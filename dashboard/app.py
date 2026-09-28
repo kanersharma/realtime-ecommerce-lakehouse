@@ -8,6 +8,7 @@ Tabs:
 import os
 import time
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 import trino
@@ -22,6 +23,107 @@ LINKS = {
 }
 
 st.set_page_config(page_title="Real-time Lakehouse", page_icon="⚡", layout="wide")
+
+# ---------------------------------------------------------------- neo-brutalist look
+# Base colors live in .streamlit/config.toml; this adds the borders, hard shadows and type.
+INK, PAPER, YELLOW, PINK, BLUE = "#111111", "#FFFBEF", "#FFD23F", "#FF6FB5", "#2F6BFF"
+# Fixed category -> color, so a category keeps its color whatever the data holds.
+# Validated for the PAPER surface with the dataviz palette validator (CVD + contrast checks).
+CATEGORY_COLORS = {
+    "Beauty": "#E83E8C", "Books": "#8A5A00", "Electronics": "#2F6BFF",
+    "Fashion": "#E8700A", "Home": "#128A5E", "Sports": "#5FB7FF",
+}
+KPI_COLORS = [YELLOW, PINK, "#7CE0C3", "#A9C4FF", "#FFB27A"]
+
+CSS = f"""
+@import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@500&display=swap');
+
+html, body, p, li, label, input, textarea, button, [data-testid="stMarkdownContainer"] {{
+  font-family: 'Space Grotesk', sans-serif !important;
+}}
+h1, h2, h3 {{ font-family: 'Archivo Black', sans-serif !important; letter-spacing: -0.02em; color: {INK}; }}
+code, pre {{ font-family: 'JetBrains Mono', monospace !important; }}
+.block-container {{ padding-top: 3.5rem; }}
+
+/* hero */
+.hero {{ background: {YELLOW}; border: 3px solid {INK}; box-shadow: 8px 8px 0 {INK}; padding: 28px 32px; margin-bottom: 28px; }}
+.hero h1 {{ font-size: 3rem; line-height: 1.05; margin: 8px 0 12px; padding: 0; }}
+.hero h1 .mark {{ background: {PINK}; border: 3px solid {INK}; padding: 0 10px; display: inline-block; transform: rotate(-1deg); }}
+.hero p {{ font-size: 1.05rem; font-weight: 500; margin: 0 0 16px; max-width: 760px; }}
+.kicker {{ display: inline-flex; align-items: center; gap: 8px; background: {INK}; color: #fff; font-weight: 700;
+          font-size: .8rem; letter-spacing: .12em; padding: 4px 10px; }}
+.dot {{ width: 10px; height: 10px; border-radius: 50%; background: #3DFF8B; animation: pulse 1.4s infinite; }}
+@keyframes pulse {{ 50% {{ opacity: .25; }} }}
+.chips {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-weight: 700; }}
+.chips span {{ background: #fff; border: 2px solid {INK}; box-shadow: 3px 3px 0 {INK}; padding: 3px 10px; font-size: .85rem; }}
+
+/* KPI tiles */
+[data-testid="stMetric"] {{ border: 3px solid {INK}; box-shadow: 6px 6px 0 {INK}; padding: 14px 18px; background: #fff; }}
+[data-testid="stMetricValue"] {{ font-family: 'Archivo Black', sans-serif !important; font-size: 2rem; }}
+[data-testid="stMetricLabel"] p {{ font-weight: 700 !important; text-transform: uppercase; letter-spacing: .04em; font-size: .72rem !important; }}
+[data-testid="stMetricLabel"] div, [data-testid="stMetricLabel"] p, [data-testid="stMetricDelta"] div {{ white-space: normal !important; overflow: visible !important; }}
+[data-testid="stMetricDelta"], [data-testid="stMetricDelta"] div {{ font-weight: 700; color: {INK} !important; }}
+[data-testid="stMetricDelta"] svg {{ fill: {INK} !important; }}
+{"".join(f'[data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child({i + 1}) [data-testid="stMetric"] {{ background: {c}; }}' for i, c in enumerate(KPI_COLORS))}
+
+/* tabs */
+.stTabs [data-baseweb="tab-list"] {{ gap: 12px; }}
+.stTabs [data-baseweb="tab"] {{ border: 3px solid {INK}; background: #fff; padding: 6px 16px; box-shadow: 4px 4px 0 {INK}; }}
+.stTabs [data-baseweb="tab"] p {{ font-weight: 700; }}
+.stTabs [aria-selected="true"] {{ background: {INK}; }}
+.stTabs [aria-selected="true"] p {{ color: #fff; }}
+.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{ display: none; }}
+
+/* buttons */
+.stButton > button {{ border: 3px solid {INK}; border-radius: 0; box-shadow: 4px 4px 0 {INK}; font-weight: 700;
+                     background: #fff; color: {INK}; transition: transform .08s, box-shadow .08s; }}
+.stButton > button[kind="primary"] {{ background: {PINK}; color: {INK}; }}
+.stButton > button:hover {{ transform: translate(2px, 2px); box-shadow: 2px 2px 0 {INK}; border-color: {INK}; color: {INK}; }}
+.stButton > button:active {{ transform: translate(4px, 4px); box-shadow: none; }}
+
+/* inputs, expanders, tables, alerts, code */
+[data-baseweb="select"] > div, [data-baseweb="textarea"], .stTextArea textarea {{ border: 3px solid {INK} !important; border-radius: 0 !important; }}
+[data-testid="stExpander"] details {{ border: 2px solid {INK}; border-radius: 0; background: #fff; }}
+[data-testid="stExpander"] summary p {{ font-family: 'JetBrains Mono', monospace !important; font-size: .8rem; }}
+[data-testid="stDataFrame"] {{ border: 2px solid {INK}; }}
+[data-testid="stAlert"] {{ border: 3px solid {INK}; border-radius: 0; box-shadow: 5px 5px 0 {INK}; }}
+[data-testid="stCode"] pre, .stCode pre {{ border: 2px solid {INK}; border-radius: 0; }}
+
+/* chart cards (st.container(border=True)) */
+[data-testid="stVerticalBlockBorderWrapper"]:has(> div > [data-testid="stVerticalBlock"] > [data-testid="stElementContainer"] .card-title) {{
+  border: 3px solid {INK} !important; border-radius: 0 !important; box-shadow: 8px 8px 0 {INK}; background: #fff;
+}}
+.card-title {{ font-family: 'Archivo Black', sans-serif; font-size: 1.25rem; margin: 0 0 4px; }}
+.card-title .tag {{ font-family: 'Space Grotesk', sans-serif; font-size: .7rem; font-weight: 700; letter-spacing: .1em;
+                   background: {INK}; color: #fff; padding: 2px 8px; margin-left: 8px; vertical-align: middle; }}
+
+/* sidebar */
+[data-testid="stSidebar"] {{ border-right: 3px solid {INK}; }}
+[data-testid="stSidebar"] a {{ color: {INK}; font-weight: 700; text-decoration: underline 3px {PINK}; }}
+"""
+st.markdown(f"<style>{CSS}</style>", unsafe_allow_html=True)
+
+
+def card(title, tag=None):
+    """A bordered 'card' container with a heavy title; use as `with card(...):`."""
+    box = st.container(border=True)
+    tag_html = f'<span class="tag">{tag}</span>' if tag else ""
+    box.markdown(f'<div class="card-title">{title}{tag_html}</div>', unsafe_allow_html=True)
+    return box
+
+
+def brutal(chart, height=300):
+    """Shared Altair styling: black axes, no chart border, Space Grotesk type."""
+    return (chart.properties(height=height)
+            .configure(font="Space Grotesk", background="transparent")
+            .configure_view(stroke=None)
+            .configure_axis(domainColor=INK, domainWidth=2, tickColor=INK, labelColor=INK, titleColor=INK,
+                            gridColor="#1111111A", labelFontSize=12, titleFontWeight=700)
+            .configure_legend(labelFontSize=12, symbolStrokeColor=INK, symbolStrokeWidth=1.5, orient="bottom", title=None))
+
+
+def draw(chart, height=300):
+    st.altair_chart(brutal(chart, height), use_container_width=True, theme=None)
 
 
 @st.cache_resource
@@ -118,7 +220,7 @@ def waiting(err):
 
 
 def pct_delta(now, prev):
-    return f"{(now - prev) / prev:+.1%} vs prev 5 min" if prev else None
+    return f"{(now - prev) / prev:+.1%} vs prev 5m" if prev else None
 
 
 # ---------------------------------------------------------------- sidebar
@@ -146,9 +248,15 @@ Iceberg on RustFS (S3)
 Trino  →  this dashboard
 ```""")
 
-st.title("Real-time E-commerce Lakehouse")
-st.caption("Kafka → Flink SQL → Apache Iceberg on S3 (RustFS) → Trino. "
-           "Every number below is a live SQL query against Iceberg tables; open 🔍 to see it.")
+st.markdown("""
+<div class="hero">
+  <span class="kicker"><span class="dot"></span>LIVE · STREAMING LAKEHOUSE</span>
+  <h1>Real-time E-commerce <span class="mark">Lakehouse</span></h1>
+  <p>Every number on this page is a live SQL query against Apache Iceberg tables that a
+     Flink job writes every 10 seconds. Open any 🔍 to see the exact query.</p>
+  <div class="chips"><span>KAFKA</span>→<span>FLINK SQL</span>→<span>APACHE ICEBERG</span>→<span>TRINO</span>→<span>YOU</span></div>
+</div>
+""", unsafe_allow_html=True)
 
 live_tab, internals_tab, sql_tab = st.tabs(["📈 Live Business", "🔬 Lakehouse Internals", "🧪 SQL Playground"])
 
@@ -176,39 +284,58 @@ def live():
                    "≈ checkpoint interval (10 s) + event-time jitter.")
     show_sql(KPI_SQL, kpi_ms, len(kpi))
 
-    left, right = st.columns([2, 1])
-    with left:
-        st.subheader("Revenue per minute by category")
+    st.write("")
+    left, right = st.columns([2, 1], gap="large")
+    with left, card("Revenue per minute", "GOLD · 1-MIN WINDOWS"):
         rev, ms = query(REVENUE_SQL)
         if rev.empty:
             st.caption("First 1-minute window closes ~65 s after data starts flowing "
                        "(window end + 5 s watermark delay).")
         else:
-            st.bar_chart(rev.pivot(index="minute", columns="category", values="revenue"), stack=True)
+            rev["time"] = pd.to_datetime(rev.minute).dt.strftime("%H:%M")
+            draw(alt.Chart(rev).mark_bar(stroke=INK, strokeWidth=1.5).encode(
+                x=alt.X("time:O", title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("revenue:Q", title="Revenue ($)", stack=True),
+                color=alt.Color("category:N", scale=alt.Scale(
+                    domain=list(CATEGORY_COLORS), range=list(CATEGORY_COLORS.values()))),
+                order=alt.Order("category:N"),
+                tooltip=["time:O", "category:N", alt.Tooltip("revenue:Q", format="$,.0f")],
+            ))
         show_sql(REVENUE_SQL, ms, len(rev))
-    with right:
-        st.subheader("Funnel · last 15 min")
-        steps = pd.Series({
-            "1 · Sessions": f.sessions, "2 · Page views": f.page_views,
-            "3 · Add to cart": f.add_to_carts, "4 · Orders": f.orders,
-        }, name="count")
-        st.bar_chart(steps, horizontal=True)
+    with right, card("Funnel", "LAST 15 MIN"):
+        steps = pd.DataFrame({
+            "step": ["Sessions", "Page views", "Add to cart", "Orders"],
+            "count": [f.sessions, f.page_views, f.add_to_carts, f.orders],
+        })
+        base = alt.Chart(steps).encode(
+            y=alt.Y("step:N", sort=None, title=None),
+            x=alt.X("count:Q", title=None, axis=alt.Axis(labels=False, ticks=False, grid=False),
+                    scale=alt.Scale(domain=[0, max(steps["count"].max(), 1) * 1.45])),  # room for labels
+        )
+        draw(base.mark_bar(fill=YELLOW, stroke=INK, strokeWidth=2.5, height=34)
+             .encode(tooltip=["step", alt.Tooltip("count:Q", format=",")])
+             + base.mark_text(align="left", dx=8, fontWeight=700, fontSize=14, color=INK)
+             .encode(text=alt.Text("count:Q", format=",")), height=300)
         show_sql(FUNNEL_SQL, funnel_ms, len(funnel))
 
-    left, right = st.columns([2, 1])
-    with left:
-        st.subheader("Top products · last 15 min")
+    st.write("")
+    left, right = st.columns([2, 1], gap="large")
+    with left, card("Top products", "LAST 15 MIN"):
         top, ms = query(TOP_PRODUCTS_SQL)
         st.dataframe(top, hide_index=True, use_container_width=True, column_config={
+            "product_name": "Product", "category": "Category", "units": "Units",
             "revenue": st.column_config.ProgressColumn(
-                "revenue", format="$%.0f", min_value=0,
+                "Revenue", format="$%.0f", min_value=0,
                 max_value=float(top.revenue.max()) if len(top) else 1.0),
         })
         show_sql(TOP_PRODUCTS_SQL, ms, len(top))
-    with right:
-        st.subheader("Revenue by country")
+    with right, card("Revenue by country", "LAST 15 MIN"):
         countries, ms = query(COUNTRY_SQL)
-        st.bar_chart(countries.set_index("country")["revenue"])
+        draw(alt.Chart(countries).mark_bar(fill=BLUE, stroke=INK, strokeWidth=2).encode(
+            x=alt.X("country:N", sort="-y", title=None, axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("revenue:Q", title="Revenue ($)"),
+            tooltip=["country", alt.Tooltip("revenue:Q", format="$,.0f")],
+        ), height=340)
         show_sql(COUNTRY_SQL, ms, len(countries))
 
 
@@ -267,14 +394,23 @@ LIMIT 200
                    "(optimistic concurrency).")
         st.code(sql, language="sql")
 
-    st.subheader("Commits over time")
-    if not snaps.empty:
-        st.line_chart(snaps.set_index("committed_at")[["added_records"]])
-    st.dataframe(snaps, hide_index=True, use_container_width=True)
-    show_sql(snaps_sql, snaps_ms, len(snaps))
+    st.write("")
+    with card("Commits over time", "1 SNAPSHOT PER CHECKPOINT"):
+        if not snaps.empty:
+            draw(alt.Chart(snaps).mark_line(color=PINK, strokeWidth=3, point=alt.OverlayMarkDef(
+                    fill=PINK, stroke=INK, strokeWidth=1.5, size=60)).encode(
+                x=alt.X("committed_at:T", title=None),
+                y=alt.Y("added_records:Q", title="Records added"),
+                tooltip=[alt.Tooltip("committed_at:T", format="%H:%M:%S"), "operation", "added_records", "added_files"],
+            ), height=240)
+        st.dataframe(snaps.astype({"snapshot_id": str}), hide_index=True, use_container_width=True)  # ids, not numbers
+        show_sql(snaps_sql, snaps_ms, len(snaps))
 
-    st.subheader("⏪ Time travel")
-    if len(snaps) > 1:
+    st.write("")
+    with card("⏪ Time travel", "FOR VERSION AS OF"):
+        if len(snaps) <= 1:
+            st.caption("Needs at least two snapshots.")
+            return
         snap = st.select_slider(
             "Query the table as it was at snapshot…",
             options=list(snaps.snapshot_id[::-1]),

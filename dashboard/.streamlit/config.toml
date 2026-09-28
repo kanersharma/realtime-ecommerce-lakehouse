@@ -1,0 +1,11 @@
+# Neo-brutalist base palette; borders, shadows and fonts are added by the CSS in app.py.
+[theme]
+base = "light"
+primaryColor = "#E83E8C"
+backgroundColor = "#FFFBEF"
+secondaryBackgroundColor = "#FFF1C1"
+textColor = "#111111"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

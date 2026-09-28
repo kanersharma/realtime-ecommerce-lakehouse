@@ -150,7 +150,7 @@ Trino. Data and metadata live in the `warehouse` bucket on **RustFS**, an S3-com
 through Iceberg's native `S3FileIO` (no Hadoop filesystem involved).
 
 ### Serving: [`dashboard/app.py`](dashboard/app.py)
-Streamlit runs every widget as a Trino query. The live tab is a `st.fragment(run_every=…)`, so only
+Streamlit runs every widget as a Trino query, with a neo-brutalist theme: flat colors, thick borders, and Altair charts on a colorblind-checked category palette. The live tab is a `st.fragment(run_every=…)`, so only
 that section re-runs on refresh. Queries filter on `event_time`, and Iceberg's per-file min/max
 statistics let Trino skip files outside the window.
 
