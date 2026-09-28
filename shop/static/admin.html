@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lakeshop · catalog admin</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗂️</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Space+Grotesk:wght@400;500;700&display=swap">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="admin">
+  <div class="demo-banner">
+    <strong>CATALOG ADMIN</strong> · products you add appear in the store instantly, and their orders
+    flow to the <a href="http://localhost:8501" target="_blank" rel="noopener">live dashboard ↗</a>
+  </div>
+
+  <header class="topbar">
+    <a class="logo" href="/">LAKE<span>SHOP</span></a>
+    <span class="pill pill-ink">CATALOG</span>
+    <label class="search">
+      <span aria-hidden="true">🔍</span>
+      <input id="search" type="search" placeholder="Search by name, id, category…" autocomplete="off" aria-label="Search catalog">
+    </label>
+    <a class="btn" href="/">← Store</a>
+    <button class="btn btn-pink" id="add-btn">+ Add product</button>
+  </header>
+
+  <main>
+    <section class="bento stats">
+      <article class="tile stat-total">
+        <span class="pill">📦 PRODUCTS</span>
+        <p class="big" id="st-total">–</p>
+        <p class="muted" id="st-split"></p>
+      </article>
+      <article class="tile stat-price">
+        <span class="pill">💲 AVERAGE PRICE</span>
+        <p class="big" id="st-avg">–</p>
+        <p class="muted" id="st-range"></p>
+      </article>
+      <article class="tile stat-new">
+        <span class="pill">✨ NEWEST</span>
+        <p class="big" id="st-new-emoji">–</p>
+        <p class="muted" id="st-new-name"></p>
+      </article>
+      <nav class="tile cats" id="cats" aria-label="Filter by category"></nav>
+    </section>
+
+    <div class="section-head">
+      <h2 id="list-title">All products</h2>
+      <span class="muted" id="list-count"></span>
+    </div>
+    <section class="tile table-tile">
+      <table class="catalog">
+        <thead>
+          <tr>
+            <th><span class="sr-only">Photo</span></th><th>ID</th><th>Product</th><th>Category</th>
+            <th class="num">Price</th><th>Badge</th><th>Rating</th><th>Source</th><th><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <p class="empty" id="empty" hidden>No products match your search.</p>
+    </section>
+  </main>
+
+  <!-- Add product -->
+  <dialog id="add-dlg" class="modal" aria-labelledby="add-title">
+    <form method="dialog"><button class="close" aria-label="Close">✕</button></form>
+    <div class="add-layout">
+      <form id="add-form" class="checkout" novalidate>
+        <h2 id="add-title">Add a product</h2>
+        <fieldset>
+          <legend>1 · Details</legend>
+          <label>Name <input name="name" maxlength="60" placeholder="Game Controller" autocomplete="off"></label>
+          <div class="row">
+            <label>Category <select name="category" id="add-category"></select></label>
+            <label>Price (USD) <input name="price" type="number" inputmode="decimal" step="0.01" min="0.01" max="10000" placeholder="49.99"></label>
+          </div>
+          <label>Badge
+            <select name="badge" id="add-badge"><option value="">None</option></select>
+          </label>
+          <label>Description
+            <textarea name="description" rows="3" maxlength="400" placeholder="What makes it great? (10–400 characters)"></textarea>
+            <span class="muted small-note" id="desc-count">0 / 400</span>
+          </label>
+        </fieldset>
+        <fieldset>
+          <legend>2 · Photo</legend>
+          <div class="emoji-grid" id="emoji-grid" role="radiogroup" aria-label="Product emoji"></div>
+        </fieldset>
+        <p class="error" id="add-error" role="alert" hidden></p>
+        <button class="btn btn-pink wide" type="submit" id="save-btn">Add to catalog</button>
+      </form>
+      <aside class="preview" aria-label="Preview">
+        <p class="muted">Live preview</p>
+        <div id="preview"></div>
+        <p class="muted small-note">This is how it will look in the store.</p>
+      </aside>
+    </div>
+  </dialog>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="common.js"></script>
+  <script src="admin.js"></script>
+</body>
+</html>

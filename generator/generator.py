@@ -10,6 +10,7 @@ import math
 import os
 import random
 import time
+import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,8 +18,22 @@ from pathlib import Path
 # Shared with the storefront (shop/), so simulated and real events use the same products.
 # Repo: catalog/products.json; container: /catalog/products.json (mounted by docker-compose).
 CATALOG = Path(__file__).resolve().parent.parent / "catalog" / "products.json"
-PRODUCTS = [(p["id"], p["name"], p["category"], p["price"])  # (product_id, name, category, unit_price)
-            for p in json.loads(CATALOG.read_text(encoding="utf-8"))]
+
+
+def load_products(shop_url=None):
+    """(product_id, name, category, unit_price) tuples: the shop's live catalog (seed + admin-added
+    products) when reachable, otherwise the seed file."""
+    try:
+        if not shop_url:
+            raise OSError("no shop configured")
+        with urllib.request.urlopen(f"{shop_url}/api/products", timeout=3) as r:
+            items = json.load(r)
+    except (OSError, ValueError):
+        items = json.loads(CATALOG.read_text(encoding="utf-8"))
+    return [(p["id"], p["name"], p["category"], p["price"]) for p in items]
+
+
+PRODUCTS = load_products()
 COUNTRIES = {"IN": 30, "US": 25, "GB": 10, "DE": 10, "BR": 8, "JP": 7, "AU": 5, "CA": 5}
 PAYMENTS = {"card": 55, "upi": 20, "wallet": 15, "cod": 10}
 
@@ -85,6 +100,9 @@ def main():
         "linger.ms": 50,
         "compression.type": "zstd",
     })
+    global PRODUCTS
+    shop_url = os.getenv("SHOP_URL")
+    PRODUCTS = load_products(shop_url)
     rng = random.Random()
     sent = {"clicks": 0, "orders": 0}
     last_log = time.time()
@@ -102,6 +120,7 @@ def main():
                     sent[topic] += 1
             producer.poll(0)
             if tick - last_log >= 10:
+                PRODUCTS = load_products(shop_url)  # pick up products added in the admin
                 print(f"sent clicks={sent['clicks']} orders={sent['orders']} (rate {rate:.1f} sessions/s)", flush=True)
                 last_log = tick
             time.sleep(max(0.0, 1 - (time.time() - tick)))

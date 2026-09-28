@@ -19,6 +19,14 @@ def source_columns(table):
             if line.strip() and not line.strip().startswith(("WATERMARK", "--"))}
 
 
+@pytest.fixture(autouse=True)
+def shop_db(tmp_path, monkeypatch):
+    """Every test gets a fresh catalog database, seeded from catalog/products.json.
+    The shop reads SHOP_DB on each request, so this also covers the in-process e2e server."""
+    monkeypatch.setenv("SHOP_DB", str(tmp_path / "shop.db"))
+    return tmp_path / "shop.db"
+
+
 @pytest.fixture
 def events(monkeypatch):
     """Capture what the shop would send to Kafka: list of (topic, key, event)."""

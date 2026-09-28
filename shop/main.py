@@ -1,8 +1,11 @@
 """Demo storefront: serves the shop UI and turns real clicks into the pipeline's Kafka events.
 
-  GET  /api/products   catalog (shared with the simulator: catalog/products.json)
-  POST /api/events     page_view | add_to_cart            -> topic `clicks`
-  POST /api/checkout   fake payment, one order per line   -> topic `orders`
+  GET    /api/products          catalog (seeded from catalog/products.json, plus products added in /admin)
+  POST   /api/products          add a product (admin)
+  DELETE /api/products/{id}     remove an admin-added product (seed products are protected)
+  GET    /api/catalog/options   categories, allowed emoji per category, badges (for the admin form)
+  POST   /api/events            page_view | add_to_cart            -> topic `clicks`
+  POST   /api/checkout          fake payment, one order per line   -> topic `orders`
 
 Event fields and the UTC 'yyyy-MM-dd HH:mm:ss.SSS' timestamp format match flink/sql/pipeline.sql,
 so the pipeline and dashboard need no changes. The browser only sends product ids and quantities:
@@ -14,19 +17,31 @@ card data is never stored, logged or sent to Kafka.
 import json
 import os
 import re
+import sqlite3
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 HERE = Path(__file__).resolve().parent
-# Repo: catalog/products.json; container: /catalog/products.json (mounted by docker-compose).
-CATALOG = {p["id"]: p for p in json.loads(
-    (HERE.parent / "catalog" / "products.json").read_text(encoding="utf-8"))}
+# Seed catalog. Repo: catalog/products.json; container: /catalog/products.json (mounted by compose).
+SEED = HERE.parent / "catalog" / "products.json"
+
+CATEGORIES = ["Beauty", "Books", "Electronics", "Fashion", "Home", "Sports"]
+BADGES = ["Bestseller", "New", "Deal"]
+# Product "photos" the admin can pick from. All render on Windows 10 (Emoji <= 12, below U+1FA70).
+EMOJI = {
+    "Beauty": ["💄", "💅", "🧴", "💆", "🧼", "🧽", "👄", "💋", "🌸", "🌹", "🎀", "✨", "💇", "☀️", "🧖"],
+    "Books": ["📘", "📗", "📕", "📙", "📚", "📖", "📓", "📔", "📒", "🚀", "🍳", "🧠", "🔭", "🧪", "🗺️", "🐉"],
+    "Electronics": ["🎧", "🖥️", "⌨️", "🔌", "📱", "💻", "🖱️", "📷", "🎮", "🔋", "⌚", "📺", "🔊", "🕹️", "💾", "🎙️"],
+    "Fashion": ["👟", "🧥", "👕", "👛", "👗", "👖", "👜", "🧢", "🧣", "🧤", "👒", "👠", "🕶️", "👔", "🎒", "👞"],
+    "Home": ["☕", "🌬️", "💡", "🌵", "🕯️", "🛋️", "🛏️", "🍽️", "🧺", "🧹", "🧸", "🖼️", "⏰", "🍵", "🌿"],
+    "Sports": ["🧘", "🏋️", "🚴", "🧊", "⚽", "🏀", "🎾", "🏐", "🏓", "🥊", "⛸️", "🎿", "🏈", "⛳", "🥏", "🏊"],
+}
 
 COUNTRIES = ["IN", "US", "GB", "DE", "BR", "JP", "AU", "CA"]
 ID = r"^[A-Za-z0-9-]{6,64}$"  # browser-generated user/session ids
@@ -44,6 +59,48 @@ def ts(dt):
 
 def now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+# ---------------------------------------------------------------- catalog store (SQLite)
+# The shop's operational store: seed products from products.json plus products added in /admin.
+# Container: SHOP_DB=/data/shop.db on the `shop-data` volume, so added products survive restarts.
+_initialized = set()
+
+
+def db():
+    path = Path(os.getenv("SHOP_DB") or HERE / "data" / "shop.db")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path, timeout=10)
+    con.row_factory = sqlite3.Row
+    if str(path) not in _initialized:
+        with con:
+            con.execute("""CREATE TABLE IF NOT EXISTS products (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, category TEXT NOT NULL, price REAL NOT NULL,
+                emoji TEXT NOT NULL, description TEXT NOT NULL, rating REAL NOT NULL DEFAULT 0,
+                reviews INTEGER NOT NULL DEFAULT 0, badge TEXT,
+                created_at TEXT)""")  # created_at IS NULL means a seed product
+            con.execute("CREATE UNIQUE INDEX IF NOT EXISTS products_name ON products(lower(name))")
+            # Idempotent: new seed products reach existing databases, edits never overwrite them.
+            for p in json.loads(SEED.read_text(encoding="utf-8")):
+                con.execute("INSERT OR IGNORE INTO products (id, name, category, price, emoji, description, "
+                            "rating, reviews, badge) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (p["id"], p["name"], p["category"], p["price"], p["emoji"], p["description"],
+                             p["rating"], p["reviews"], p.get("badge")))
+        _initialized.add(str(path))
+    return con
+
+
+def as_product(row):
+    p = dict(row)
+    p["seed"] = p.pop("created_at") is None
+    return {k: v for k, v in p.items() if v is not None or k == "badge"}
+
+
+def catalog():
+    """All products, seed first then admin-added, as {id: product}."""
+    with db() as con:
+        rows = con.execute("SELECT * FROM products ORDER BY created_at IS NOT NULL, created_at, id").fetchall()
+    return {r["id"]: as_product(r) for r in rows}
 
 
 # ---------------------------------------------------------------- request models
@@ -67,6 +124,20 @@ class Payment(BaseModel):
     upi_id: Optional[str] = None
 
 
+class NewProduct(BaseModel):
+    name: str = Field(min_length=2, max_length=60, pattern=r"^[\w][\w .,'&()+/-]*$")
+    category: Literal[tuple(CATEGORIES)]
+    price: float = Field(gt=0, le=10000)
+    emoji: str
+    description: str = Field(min_length=10, max_length=400)
+    badge: Optional[Literal[tuple(BADGES)]] = None
+
+    @field_validator("name", "description", mode="before")
+    @classmethod
+    def tidy(cls, v):  # trim and collapse whitespace before the length/pattern checks
+        return " ".join(v.split()) if isinstance(v, str) else v
+
+
 class Checkout(BaseModel):
     user_id: str = Field(pattern=ID)
     session_id: str = Field(pattern=ID)
@@ -78,9 +149,37 @@ class Checkout(BaseModel):
 
 # ---------------------------------------------------------------- pure logic (tested in test_shop.py)
 def product(product_id):
-    if product_id not in CATALOG:
+    with db() as con:
+        row = con.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    if row is None:
         raise HTTPException(404, f"Unknown product {product_id}")
-    return CATALOG[product_id]
+    return as_product(row)
+
+
+def create_product(new: NewProduct, at):
+    """Validate beyond the model (money precision, emoji list, unique name) and insert -> product."""
+    name = new.name
+    if round(new.price, 2) != new.price:
+        raise HTTPException(422, "Price can have at most 2 decimals.")
+    if new.emoji not in EMOJI[new.category]:
+        raise HTTPException(422, f"Pick an emoji from the {new.category} set.")
+    with db() as con:
+        if con.execute("SELECT 1 FROM products WHERE lower(name) = lower(?)", (name,)).fetchone():
+            raise HTTPException(409, f"A product called “{name}” already exists.")
+        last = con.execute("SELECT max(CAST(substr(id, 2) AS INTEGER)) FROM products").fetchone()[0] or 0
+        pid = f"P{last + 1:03d}"
+        con.execute("INSERT INTO products (id, name, category, price, emoji, description, badge, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (pid, name, new.category, new.price, new.emoji, new.description, new.badge, ts(at)))
+    return product(pid)
+
+
+def delete_product(product_id):
+    p = product(product_id)
+    if p["seed"]:
+        raise HTTPException(403, "Seed products can't be deleted.")
+    with db() as con:
+        con.execute("DELETE FROM products WHERE id = ?", (product_id,))
 
 
 def authorize(p: Payment, today=None):
@@ -149,7 +248,24 @@ app = FastAPI(title="Lakeshop demo store")
 
 @app.get("/api/products")
 def products():
-    return list(CATALOG.values())
+    return list(catalog().values())
+
+
+@app.post("/api/products", status_code=201)
+def add_product(new: NewProduct):
+    # ponytail: no auth on the admin API; fine for a localhost demo, add a login before exposing it.
+    return create_product(new, now())
+
+
+@app.delete("/api/products/{product_id}", status_code=204)
+def remove_product(product_id: str):
+    delete_product(product_id)
+    return Response(status_code=204)
+
+
+@app.get("/api/catalog/options")
+def catalog_options():
+    return {"categories": CATEGORIES, "emoji": EMOJI, "badges": BADGES}
 
 
 @app.post("/api/events", status_code=202)

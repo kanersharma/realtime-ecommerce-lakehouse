@@ -58,6 +58,19 @@ The server prices the order from the catalog (the browser can't change prices) a
 
 > Payments are fake. Only published test numbers work, and card details are never stored or sent anywhere.
 
+## 4b · Add your own product
+
+![Catalog admin](screenshots/admin-catalog.png)
+
+Press **🗂️ Catalog** in the store's top bar. You'll see all products with stats and filters. Press
+**+ Add product**, give it a name, category, price and description, and pick an emoji "photo". The
+preview shows exactly how the store will display it.
+
+![Add product](screenshots/admin-add.png)
+
+Save it, press **View** to jump to it in the store, and buy it. Its order reaches the dashboard like
+any other, because it has the same event contract.
+
 ## 5 · Watch it land (about 15 seconds)
 
 ![Dashboard](screenshots/dashboard-light.png)

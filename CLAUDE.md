@@ -32,10 +32,11 @@ end to end before making the final change (commit, push, or saying "done").** Co
    | `test_catalog.py` | catalog integrity; the 6 categories stay in sync across catalog, dashboard and shop UI |
    | `test_contract.py` | shop and simulator events have exactly the columns in `pipeline.sql` |
    | `test_shop_api.py` | every endpoint and payment method (card/UPI/COD), validation, price tampering, no card-data leaks |
+   | `test_catalog_api.py` | add/list/validate/persist/delete products; a new product can be bought |
    | `test_generator.py` | simulator funnel logic |
    | `test_dashboard.py` | dashboard via Streamlit `AppTest` with a fake Trino: KPIs, themes, waiting state, SQL guard |
-   | `test_storefront_e2e.py` | real browser (Playwright + Edge): search, cart, all checkouts, server-down message, layout |
-   | `test_integration.py` | running stack: a real order lands in Iceberg and is queryable in Trino |
+   | `test_storefront_e2e.py` | real browser (Playwright + Edge): search, cart, all checkouts, server-down message, layout, catalog admin (add → view → buy, validation, delete) |
+   | `test_integration.py` | running stack: real orders (including an admin-added product) land in Iceberg; dashboard SQL runs on real Trino |
 2. **Run the whole suite**, not just the file you touched:
    ```bash
    python -m venv .venv && .venv/Scripts/python -m pip install -r requirements-dev.txt   # once
@@ -57,7 +58,7 @@ end to end before making the final change (commit, push, or saying "done").** Co
 | kafka | apache/kafka:3.9.0 | 29092 (host listener) | KRaft single node. In-network address: `kafka:9092` |
 | kafka-init | apache/kafka:3.9.0 | – | one-shot: creates topics `clicks`, `orders` (3 partitions) |
 | kafka-ui | kafbat/kafka-ui:v1.1.0 | 8088→8080 | optional, ~300 MB RAM |
-| shop | ./shop | 8000 | Lakeshop storefront + API; produces to `clicks` / `orders`. `KAFKA_BOOTSTRAP` unset = dry run (prints events) |
+| shop | ./shop | 8000 | Lakeshop storefront, catalog admin (`/admin.html`) and API; produces to `clicks` / `orders`. Catalog in SQLite at `SHOP_DB=/data/shop.db` (volume `shop-data`). `KAFKA_BOOTSTRAP` unset = dry run (prints events) |
 | generator | ./generator | – | **opt-in**: `--profile simulator`; env `SESSIONS_PER_SEC` (default 20) |
 | rustfs | rustfs/rustfs:1.0.0 | 9000 (S3), 9001 (console) | creds `admin` / `password` |
 | s3-init | amazon/aws-cli | – | one-shot: creates bucket `warehouse` |
@@ -78,11 +79,14 @@ The catalog name `lakehouse` and schema `shop` are the same in Flink and Trino. 
   `flink-shaded-hadoop-2-uber` is required because Iceberg's Flink catalog references
   `org.apache.hadoop.conf.Configuration`, even with a REST catalog.
 - `trino/catalog/lakehouse.properties`: Iceberg REST + native S3 (`fs.native-s3.enabled`).
-- `catalog/products.json`: the single product catalog, mounted at `/catalog/products.json` into shop and
-  generator. Both load it as `Path(__file__).parent.parent / "catalog" / "products.json"`. Keep the six
-  categories in sync with `CATEGORY_COLORS` (dashboard) and `CATS` (shop/static/app.js).
-- `shop/main.py`: pure functions `authorize`, `click_event`, `order_events` (tested in `tests/`)
-  plus the FastAPI routes. `shop/static/`: no-build UI (index.html, styles.css, app.js).
+- `catalog/products.json`: the **seed** catalog (48 products), mounted at `/catalog/products.json`. The shop
+  seeds its SQLite database from it (`INSERT OR IGNORE`); the live catalog, including admin-added
+  products, is `GET /api/products`, which the simulator also reads. Keep the six categories in sync with
+  `CATEGORY_COLORS` (dashboard), `CATS` (`shop/static/common.js`) and `CATEGORIES`/`EMOJI` (`shop/main.py`).
+- `shop/main.py`: catalog store (`db()`, `catalog()`, `product()`, `create_product()`, `delete_product()`),
+  pure functions `authorize`, `click_event`, `order_events`, and the FastAPI routes. `shop/static/`:
+  no-build UIs: store (`index.html`, `app.js`), catalog admin (`admin.html`, `admin.js`), shared
+  helpers (`common.js`), `styles.css`.
 - `generator/generator.py`: `session_events(now, rng)` is pure and tested; `main()` does Kafka I/O.
 - `tests/`: the whole test suite (pytest; config in `pytest.ini`, deps in `requirements-dev.txt`).
 - `dashboard/app.py`: all SQL is in module-level constants; `query(sql) -> (DataFrame, ms)`.

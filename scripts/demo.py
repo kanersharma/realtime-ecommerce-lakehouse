@@ -124,6 +124,23 @@ def store_screenshots(browser):
     shoot(page, "store-success")
     ctx.close()
 
+    # catalog admin: the list, then the add dialog filled in but NOT saved (keeps the catalog clean)
+    ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+    page = ctx.new_page()
+    page.goto(f"{SHOP}/admin.html")
+    page.locator("#rows tr").first.wait_for()
+    shoot(page, "admin-catalog")
+    page.locator("#add-btn").click()
+    page.locator('#add-form [name="name"]').fill("Retro Game Controller")
+    page.locator("#add-category").select_option("Electronics")
+    page.locator('#add-form [name="price"]').fill("49.99")
+    page.locator("#add-badge").select_option("New")
+    page.locator('#add-form [name="description"]').fill(
+        "Wireless controller with hall-effect sticks, 40-hour battery and a satisfyingly clicky D-pad.")
+    page.locator('.emoji-choice input[value="🎮"]').check(force=True)
+    shoot(page, "admin-add")
+    ctx.close()
+
     mobile = browser.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True)
     page = mobile.new_page()
     page.goto(SHOP)

@@ -20,6 +20,15 @@ expect = playwright_api.expect
 SENT = []  # (topic, key, event) captured from the running shop
 
 
+def catalog():
+    return list(shop.catalog().values())  # the test's fresh, seeded database (conftest.shop_db)
+
+
+def matching(q):
+    """Products the store's search should show for q (same fields as app.js render())."""
+    return [p for p in catalog() if q in f"{p['name']} {p['category']} {p['description']}".lower()]
+
+
 @pytest.fixture(scope="module")
 def base_url():
     original = shop.publish
@@ -59,7 +68,7 @@ def page(browser, base_url):
     # JS errors fail the test. "Failed to load resource" is Chrome logging an expected 402 / aborted request.
     pg.on("console", lambda m: m.type == "error" and "Failed to load resource" not in m.text and errors.append(m.text))
     pg.goto(base_url)
-    expect(pg.locator(".product")).to_have_count(24)
+    expect(pg.locator(".product")).to_have_count(len(catalog()))
     yield pg
     context.close()
     assert errors == [], f"browser errors: {errors}"
@@ -91,7 +100,7 @@ def open_checkout(page):
 
 # ------------------------------------------------ browsing
 def test_home_page_bento(page):
-    bestsellers = sum(p.get("badge") == "Bestseller" for p in shop.CATALOG.values())
+    bestsellers = sum(p.get("badge") == "Bestseller" for p in catalog())
     expect(page.locator(".product.wide")).to_have_count(bestsellers)  # bestsellers span two columns
     expect(page.locator(".cat")).to_have_count(7)               # All + six categories
     expect(page.locator("#hero-product")).to_contain_text("Streaming Systems Handbook")
@@ -100,21 +109,21 @@ def test_home_page_bento(page):
 
 def test_search_filters_products(page):
     page.locator("#search").fill("book")
-    expect(page.locator(".product")).to_have_count(4)
+    expect(page.locator(".product")).to_have_count(len(matching("book")))
     expect(page.locator("#results-title")).to_contain_text("book")
     page.locator("#search").fill("zzzz")
     expect(page.locator(".product")).to_have_count(0)
     expect(page.locator("#empty")).to_be_visible()
     page.locator("#search").fill("")
-    expect(page.locator(".product")).to_have_count(24)
+    expect(page.locator(".product")).to_have_count(len(catalog()))
 
 
 def test_category_filter(page):
     page.locator('.cat[data-cat="Beauty"]').click()
-    expect(page.locator(".product")).to_have_count(4)
+    expect(page.locator(".product")).to_have_count(sum(p["category"] == "Beauty" for p in catalog()))
     expect(page.locator('.cat[data-cat="Beauty"]')).to_have_attribute("aria-pressed", "true")
     page.locator('.cat[data-cat="All"]').click()
-    expect(page.locator(".product")).to_have_count(24)
+    expect(page.locator(".product")).to_have_count(len(catalog()))
 
 
 def test_opening_a_product_sends_page_view(page):
@@ -268,4 +277,125 @@ def test_server_down_on_load(browser, base_url):
 @pytest.mark.parametrize("width", [375, 768, 1440])
 def test_no_horizontal_scroll(page, width):
     page.set_viewport_size({"width": width, "height": 900})
+    assert page.evaluate("document.documentElement.scrollWidth") <= width
+
+
+# ------------------------------------------------ catalog admin (admin.html)
+NEW = {"name": "Game Controller", "category": "Electronics", "price": "49.99", "emoji": "🎮",
+       "description": "Wireless controller with hall-effect sticks and 40 hours of battery."}
+
+
+def open_admin(page, base_url):
+    page.goto(f"{base_url}/admin.html")
+    expect(page.locator("#rows tr")).to_have_count(len(catalog()))
+
+
+def fill_new_product(page, **over):
+    d = {**NEW, **over}
+    page.locator("#add-btn").click()
+    expect(page.locator("#add-dlg")).to_be_visible()
+    page.locator('#add-form [name="name"]').fill(d["name"])
+    page.locator("#add-category").select_option(d["category"])
+    page.locator('#add-form [name="price"]').fill(d["price"])
+    page.locator('#add-form [name="description"]').fill(d["description"])
+    page.locator(f'.emoji-choice input[value="{d["emoji"]}"]').check(force=True)
+
+
+def test_admin_lists_the_catalog(page, base_url):
+    open_admin(page, base_url)
+    expect(page.locator("#st-total")).to_have_text(str(len(catalog())))
+    expect(page.locator("#st-split")).to_contain_text("0 added by you")
+    expect(page.locator("[data-del]")).to_have_count(0)            # seed products can't be deleted
+    page.locator("#search").fill("P015")
+    expect(page.locator("#rows tr")).to_have_count(1)
+    expect(page.locator("#rows")).to_contain_text("Data Engineering Book")
+    page.locator("#search").fill("")
+    page.locator('.cat[data-cat="Books"]').click()
+    expect(page.locator("#rows tr")).to_have_count(sum(p["category"] == "Books" for p in catalog()))
+
+
+def test_store_links_to_the_catalog(page, base_url):
+    page.locator("#catalog-link").click()
+    expect(page).to_have_url(f"{base_url}/admin.html")
+    expect(page.locator("#add-btn")).to_be_visible()
+
+
+def test_emoji_picker_follows_the_category(page, base_url):
+    open_admin(page, base_url)
+    page.locator("#add-btn").click()
+    page.locator("#add-category").select_option("Books")
+    expect(page.locator(".emoji-choice")).to_have_count(len(shop.EMOJI["Books"]))
+    expect(page.locator('.emoji-choice input[value="📘"]')).to_have_count(1)
+    expect(page.locator('.emoji-choice input[value="🎮"]')).to_have_count(0)
+
+
+def test_add_product_then_buy_it_end_to_end(page, base_url):
+    """Admin adds a product -> it's in the store -> a shopper buys it -> events carry its data."""
+    open_admin(page, base_url)
+    fill_new_product(page)
+    page.locator("#add-badge").select_option("New")
+    preview = page.locator("#preview")
+    expect(preview).to_contain_text("Game Controller")
+    expect(preview).to_contain_text("$49.99")
+    expect(preview).to_contain_text("NEW")
+    page.locator("#save-btn").click()
+
+    expect(page.locator("#add-dlg")).to_be_hidden()
+    expect(page.locator("#toast")).to_contain_text("Added 🎮 Game Controller (P049)")
+    expect(page.locator('tr[data-id="P049"]')).to_contain_text("Added")
+    expect(page.locator("#st-split")).to_contain_text("1 added by you")
+
+    page.locator('tr[data-id="P049"] a:has-text("View")').click()     # deep link into the store
+    expect(page.locator(".product")).to_have_count(1)
+    expect(page.locator(".product")).to_contain_text("No reviews yet")
+    page.get_by_role("button", name="Game Controller, $49.99").click()
+    wait_for(lambda: sent("clicks", "page_view"))
+    assert sent("clicks", "page_view")[0]["product_id"] == "P049"
+    page.locator("#pd-add").click()
+    open_checkout(page)
+    page.locator('input[name="name"]').fill("Test Shopper")
+    page.locator('input[name="method"][value="cod"]').check()
+    page.locator("#pay-btn").click()
+    expect(page.locator("#co-success")).to_be_visible()
+    (order,) = sent("orders")
+    assert (order["product_id"], order["product_name"], order["unit_price"]) == ("P049", "Game Controller", 49.99)
+
+
+@pytest.mark.parametrize("over,message", [
+    ({"name": ""}, "Give the product a name"),
+    ({"name": "<b>Bold</b>"}, "Names can use"),
+    ({"name": "4k monitor"}, "already exists"),
+    ({"price": "1.234"}, "at most 2 decimals"),
+    ({"price": "0"}, "between $0.01"),
+    ({"description": "short"}, "at least 10 characters"),
+])
+def test_add_product_validation(page, base_url, over, message):
+    open_admin(page, base_url)
+    fill_new_product(page, **over)
+    page.locator("#save-btn").click()
+    expect(page.locator("#add-error")).to_contain_text(message)
+    expect(page.locator("#add-dlg")).to_be_visible()
+    page.locator('#add-form [name="description"]').press("End")    # editing clears the stale error
+    page.locator('#add-form [name="description"]').type("!")
+    expect(page.locator("#add-error")).to_be_hidden()
+    assert len(catalog()) == 48
+
+
+def test_delete_an_added_product(page, base_url):
+    import httpx
+    body = {**NEW, "price": 49.99}
+    assert httpx.post(f"{base_url}/api/products", json=body).status_code == 201
+    open_admin(page, base_url)
+    expect(page.locator("[data-del]")).to_have_count(1)            # only the added product
+    page.once("dialog", lambda d: d.accept())
+    page.locator('[data-del="P049"]').click()
+    expect(page.locator('tr[data-id="P049"]')).to_have_count(0)
+    expect(page.locator("#toast")).to_contain_text("Deleted Game Controller")
+    assert "P049" not in shop.catalog()
+
+
+@pytest.mark.parametrize("width", [375, 1440])
+def test_admin_has_no_horizontal_page_scroll(page, base_url, width):
+    page.set_viewport_size({"width": width, "height": 900})
+    open_admin(page, base_url)
     assert page.evaluate("document.documentElement.scrollWidth") <= width

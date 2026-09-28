@@ -27,7 +27,8 @@ def orders(events):
 def test_products_endpoint(client):
     r = client.get("/api/products")
     assert r.status_code == 200
-    assert len(r.json()) == 24
+    assert len(r.json()) == 48
+    assert all(p["seed"] for p in r.json())
     assert {"id", "name", "category", "price", "description", "emoji"} <= set(r.json()[0])
 
 

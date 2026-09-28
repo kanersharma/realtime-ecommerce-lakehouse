@@ -42,7 +42,7 @@ time travel). One command starts everything: `docker compose up -d --build`.
 ### 6.1 Lakeshop storefront (`shop/`, http://localhost:8000)
 | ID | Requirement |
 |---|---|
-| S-1 | Catalog of 24 fake products in 6 categories, each with a description, rating, reviews, an emoji "photo" and an optional badge (Bestseller/New/Deal) |
+| S-1 | Seed catalog of 48 fake products (8 in each of 6 categories), each with a description, rating, reviews, an emoji "photo" and an optional badge (Bestseller/New/Deal) |
 | S-2 | Bento-grid home: hero with featured product, live event counter, test-payment hints, category tiles, product grid (bestsellers are wide tiles) |
 | S-3 | Live search over name, category and description, plus a category filter |
 | S-4 | Product dialog with a quantity stepper; opening it emits `page_view` |
@@ -53,6 +53,10 @@ time travel). One command starts everything: `docker compose up -d --build`.
 | S-9 | A successful checkout emits **one `orders` event per cart line**; a failed one emits nothing |
 | S-10 | Clear errors: validation, declines, and "can't reach the server" (never a raw "Failed to fetch") |
 | S-11 | Anonymous `user_id` (per browser) and `session_id` (per tab) tie the funnel together |
+| S-12 | Catalog admin (`/admin.html`): list, search and filter all products, with stats |
+| S-13 | "+ Add product": name, category, price, badge, description, and an emoji picker per category, with a live preview; the product is instantly buyable and its orders reach the dashboard |
+| S-14 | Admin-added products persist across restarts and can be deleted; seed products are protected |
+| S-15 | *(Phase 9)* Inventory: stock per product, decremented by orders and increased by restocks, with a forecasting and reorder dashboard (see Phases.md §2.0) |
 
 ### 6.2 Pipeline
 | ID | Requirement |

@@ -28,6 +28,8 @@ dashboard shows revenue, the conversion funnel and top products, plus the lakeho
 | ![Checkout](docs/screenshots/store-checkout.png) | ![Declined](docs/screenshots/store-declined.png) | ![Success](docs/screenshots/store-success.png) |
 | **Dashboard, dark mode** | **Lakehouse internals** | **SQL playground** |
 | ![Dark](docs/screenshots/dashboard-dark.png) | ![Internals](docs/screenshots/dashboard-internals.png) | ![SQL](docs/screenshots/dashboard-sql.png) |
+| **Catalog admin** | **Add a product (emoji picker + live preview)** | **Mobile store** |
+| ![Catalog admin](docs/screenshots/admin-catalog.png) | ![Add product](docs/screenshots/admin-add.png) | <img src="docs/screenshots/store-mobile.png" width="200" alt="Mobile"> |
 
 Regenerate them any time with `.venv/Scripts/python scripts/demo.py` (it sends real shopper traffic
 through the store, then captures both apps).
@@ -123,6 +125,7 @@ Stop it with `docker compose down`, or wipe all data with `docker compose down -
 | URL | What to look at |
 |---|---|
 | http://localhost:8000 | **Lakeshop**: the storefront that produces the events (test card `4242 4242 4242 4242`) |
+| http://localhost:8000/admin.html | **Catalog admin**: list, search and add products (with an emoji picker) |
 | http://localhost:8501 | **Dashboard**: live business view, lakehouse internals, SQL playground (`?theme=dark` for dark mode) |
 | http://localhost:8081 | **Flink**: job graph, checkpoints (size and duration), backpressure, watermarks |
 | http://localhost:8088 | **Kafka UI**: topics, partitions, consumer lag, live messages |
@@ -160,9 +163,16 @@ A FastAPI app serves a no-build bento-grid UI (plain HTML/CSS/JS with native `<d
 
 | Endpoint | Emits | Notes |
 |---|---|---|
-| `GET /api/products` | – | Catalog from [`catalog/products.json`](catalog/products.json), shared with the simulator |
+| `GET /api/products` | – | The catalog: seed products from [`catalog/products.json`](catalog/products.json) plus admin-added ones |
+| `POST /api/products` · `DELETE /api/products/{id}` | – | Add a product; delete an admin-added one (seed products are protected) |
 | `POST /api/events` | `clicks` | `page_view` when a product opens, `add_to_cart` on add |
 | `POST /api/checkout` | `orders` | Fake payment, then **one order event per cart line** (the grain of the `orders` table) |
+
+**Catalog admin** (`/admin.html`, or the 🗂️ Catalog button): browse all products and **add new ones**
+with a name, category, price, badge, description and an emoji "photo" from a per-category picker,
+with a live preview. New products are buyable immediately, and their orders flow to the dashboard like
+any other. The catalog lives in the shop's SQLite database (seeded from `catalog/products.json`, kept
+in the `shop-data` volume), so added products survive restarts.
 
 The browser only sends product ids and quantities, so **prices, totals, ids and timestamps are set on
 the server** and a client can't tamper with them. Anonymous `user_id` (per browser) and `session_id`
@@ -259,9 +269,10 @@ ALTER TABLE orders EXECUTE optimize;
 │   ├── catalog/lakehouse.properties   # Trino → Iceberg REST catalog + S3
 │   └── jvm.config              # fixed 1 GB heap (prevents OOM-kill in a 1.5 GB container)
 ├── shop/
-│   ├── main.py                 # storefront API: catalog, click events, fake checkout -> Kafka
-│   └── static/                 # bento UI: index.html, styles.css, app.js (no build step)
-├── catalog/products.json       # 24 fake products, shared by shop and simulator
+│   ├── main.py                 # API: catalog store (SQLite), click events, fake checkout -> Kafka
+│   └── static/                 # bento UIs, no build step: store (index.html, app.js),
+│                               #   catalog admin (admin.html, admin.js), common.js, styles.css
+├── catalog/products.json       # 48 seed products, shared by shop and simulator
 ├── generator/
 │   └── generator.py            # optional traffic simulator (--profile simulator)
 ├── dashboard/
@@ -289,6 +300,7 @@ python -m venv .venv
 | `test_catalog.py` | Catalog integrity; categories stay in sync across catalog, dashboard colors and store UI |
 | `test_contract.py` | Shop and simulator events have exactly the columns Flink reads in `pipeline.sql` |
 | `test_shop_api.py` | Every endpoint and payment method (card / UPI / COD), validation, price tampering, no card-data leaks |
+| `test_catalog_api.py` | Adding, validating, persisting and deleting products; a new product can be bought |
 | `test_generator.py` | Simulator funnel logic |
 | `test_dashboard.py` | Dashboard run headless (Streamlit `AppTest`) against a fake Trino: KPIs, themes, SQL guard |
 | `test_storefront_e2e.py` | A real browser (Playwright + Edge) shops: search, cart, every checkout, server-down handling, layout |

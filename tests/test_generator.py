@@ -44,6 +44,22 @@ def test_orders_follow_add_to_cart_and_prices_add_up(sessions):
     assert orders > 0
 
 
+def test_simulator_reads_the_live_catalog_from_the_shop(monkeypatch):
+    import io
+    import json
+
+    live = [{"id": "P049", "name": "Game Controller", "category": "Electronics", "price": 49.99}]
+    monkeypatch.setattr(generator.urllib.request, "urlopen",
+                        lambda url, timeout: io.BytesIO(json.dumps(live).encode()))
+    assert generator.load_products("http://shop:8000") == [("P049", "Game Controller", "Electronics", 49.99)]
+
+
+def test_simulator_falls_back_to_the_seed_file():
+    seed = generator.load_products(None)
+    assert generator.load_products("http://127.0.0.1:9") == seed  # nothing listens on port 9
+    assert len(seed) == 48
+
+
 def test_simulator_uses_the_shared_catalog():
     import json
     from conftest import ROOT

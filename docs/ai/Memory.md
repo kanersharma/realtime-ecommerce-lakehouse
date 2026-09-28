@@ -17,6 +17,19 @@
 
 ## 2. Decision and incident log (newest first)
 
+### 2026-09-28 · Catalog moved into the shop's SQLite database
+- **Why:** admin-added products must persist, and the next phase (inventory) needs transactional
+  stock updates. A JSON file mounted read-only can't do either. SQLite is in the standard library,
+  needs no extra service, and handles one writer (the shop) well.
+- **How:** `catalog/products.json` became the *seed*. `INSERT OR IGNORE` on startup is idempotent and
+  never overwrites edits. The simulator reads the live catalog from `GET /api/products`.
+- **Found while testing:** names with leading spaces were rejected (the pattern check ran before
+  trimming). Now a pydantic `mode="before"` validator trims and collapses whitespace first.
+- **Owner's plan:** the next phase is inventory (stock, restock, forecasting and reorder suggestions);
+  the design is in Phases.md §2.0.
+- **Docker note:** after a Docker Desktop restart, BuildKit failed with "parent snapshot … does not
+  exist". `docker builder prune -f` (build cache only) fixed it.
+
 ### 2026-09-28 · Screenshots on real data exposed four bugs
 - **Iceberg `summary` keys are optional.** Flink commits *empty* snapshots on idle checkpoints (to
   advance its checkpoint bookkeeping); they have no `added-records`. `summary['added-records']`

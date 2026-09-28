@@ -92,7 +92,23 @@ tiles for friendliness.
   last event name.
 - **Copy tone**: short, friendly and a little cheeky ("Pay when it (doesn't) arrive. It's a demo.").
 
-## 5. Accessibility checklist
+## 5. Catalog admin (`/admin.html`)
+- The same topbar as the store, plus an ink **CATALOG** pill, a search box, "← Store" and a pink
+  **"+ Add product"** button. The store's topbar links here with a **🗂️ Catalog** button.
+- **Stats bento:** products (yellow; "N seed · N added by you"), average price with range (mint), and
+  newest product (periwinkle), above the same 7 category buttons as the store (filters).
+- **Product table** inside one tile (horizontal scroll inside the tile on narrow screens, never on the
+  page): emoji thumb on the category tint, mono id, name with a one-line description, category chip
+  with the category colour as a thick bottom border, price, badge, rating ("No reviews yet" for new),
+  Source ("Seed" or a yellow "Added" chip), and actions (**View** deep-links to `/?q=name`; 🗑️ only
+  on added products). A newly added row flashes yellow.
+- **Add dialog:** two columns (they stack below 1000 px). The form has fieldsets "1 · Details" (name,
+  category, price, badge, description with a live counter) and "2 · Photo" (an emoji grid as a
+  radiogroup; the selected emoji turns yellow with a shadow; the choices follow the category). The
+  **live preview** is a real store tile, so what you see is what the store shows. Errors appear in the
+  pink box and clear as soon as you edit.
+
+## 6. Accessibility checklist
 - Every input has a `<label>`. Icon buttons have `aria-label`s. Product tiles are `role="button"`
   with `tabindex="0"` and Enter/Space handling.
 - Visible focus: a 3 px pink outline.
@@ -100,7 +116,7 @@ tiles for friendliness.
 - Colour is never the only carrier of meaning: legends, labels, arrows, text.
 - The layout has no horizontal scroll at 375, 768 or 1440 px (tested).
 
-## 6. Screenshots
+## 7. Screenshots
 `scripts/demo.py` captures 13 images into `docs/screenshots/` (store at 1440×900 plus mobile at 390 px
 @2x; dashboard at 1440×1500 in light, dark, internals and SQL). Review every image before committing,
 because screenshots on real data have exposed real bugs (see Memory.md).

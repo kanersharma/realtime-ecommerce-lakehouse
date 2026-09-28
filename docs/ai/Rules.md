@@ -36,13 +36,28 @@
   (beyond the last 4 digits) or events.
 - **R-SHOP-5** Network failures MUST show a human message, never a raw "Failed to fetch".
 - **R-SHOP-6** No frontend build step: plain HTML/CSS/JS served by FastAPI. Prefer native elements
-  (`<dialog>`, `<output>`, radio groups) over libraries.
+  (`<dialog>`, `<output>`, radio groups) over libraries. Helpers shared by the store and the admin
+  (`$`, `esc`, `money`, `CATS`, `api`, `toast`, `ratingText`) live in `common.js`; don't duplicate them.
+- **R-SHOP-7** Everything user-supplied (product names and descriptions from the admin) is rendered with
+  `esc()`. Names are also restricted server-side to letters, numbers, spaces and `. , ' & ( ) + / -`.
+- **R-SHOP-8** The admin API has no auth (a `ponytail:` note in `main.py`). NEVER expose the stack
+  beyond localhost without adding a login first.
 
 ## R-CAT: Catalog
-- **R-CAT-1** `catalog/products.json` is the single source for products, shared by shop and simulator.
+- **R-CAT-1** `catalog/products.json` is the **seed** catalog. At runtime the shop's SQLite database
+  (seed plus admin-added products) is the source of truth, served by `GET /api/products`. Seeding stays
+  idempotent (`INSERT OR IGNORE`); never overwrite existing rows from the seed file.
+- **R-CAT-4** New products go through `create_product()`, which enforces the next `P###` id,
+  2-decimal prices, a unique name (case-insensitive) and an emoji from that category's `EMOJI` list.
+  The admin UI's checks are only for speed; the server decides.
+- **R-CAT-5** Seed products can't be deleted (403). Tests that create products on the live stack MUST
+  delete them afterwards, so the demo catalog stays clean.
+- **R-CAT-6** Tests MUST NOT use the developer database: `conftest.shop_db` points `SHOP_DB` at a fresh
+  temp file for every test.
 - **R-CAT-2** Exactly 6 categories, kept in sync with `CATEGORY_COLORS` (dashboard) and `CATS`
   (`shop/static/app.js`). Tests enforce this.
-- **R-CAT-3** Product emoji MUST render on Windows 10 (Emoji ≤ 12, code points < U+1FA70).
+- **R-CAT-3** Product emoji MUST render on Windows 10 (Emoji ≤ 12, code points < U+1FA70), and seed
+  emoji MUST be in that category's admin picker list (`EMOJI` in `shop/main.py`).
 
 ## R-FLINK: Pipeline
 - **R-FLINK-1** DDL stays idempotent (`CREATE … IF NOT EXISTS`).

@@ -70,6 +70,26 @@ def test_a_real_order_reaches_the_lakehouse(stack):
                f"FROM orders WHERE session_id = '{session}'", [["P021", 3, 144.0, "JP", "cod"]])
 
 
+def test_admin_added_product_flows_to_the_lakehouse(stack):
+    """A product created in the catalog admin can be bought, and its order lands in Iceberg."""
+    http, conn = stack
+    name = f"Integration Probe {uuid.uuid4().hex[:6]}"
+    r = http.post("/api/products", json={"name": name, "category": "Home", "price": 12.34, "emoji": "☕",
+                                         "description": "Temporary product created by the integration test."})
+    assert r.status_code == 201, r.text
+    pid = r.json()["id"]
+    try:
+        session = f"S-it{uuid.uuid4().hex[:12]}"
+        r = http.post("/api/checkout", json={
+            "user_id": f"W-it{uuid.uuid4().hex[:12]}", "session_id": session, "name": "Integration Test",
+            "country": "CA", "items": [{"product_id": pid, "quantity": 2}], "payment": {"method": "cod"}})
+        assert r.status_code == 200, r.text
+        poll(conn, f"SELECT product_id, product_name, category, CAST(total_amount AS double) "
+                   f"FROM orders WHERE session_id = '{session}'", [[pid, name, "Home", 24.68]])
+    finally:  # keep the demo catalog clean; the order itself stays in the lakehouse
+        assert http.delete(f"/api/products/{pid}").status_code == 204
+
+
 def test_dashboard_queries_run_on_real_trino(stack, monkeypatch):
     """Every dashboard query must be valid on real Trino and real Iceberg metadata.
 

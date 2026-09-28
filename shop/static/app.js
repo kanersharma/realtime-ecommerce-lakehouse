@@ -1,18 +1,6 @@
 // Lakeshop front end. Every meaningful action becomes a pipeline event via the shop API:
 //   open a product -> page_view, add to cart -> add_to_cart, pay -> one order per cart line.
-const $ = (s) => document.querySelector(s);
-const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
-// Category tints for tiles; the stripe colors match the dashboard's category colors.
-const CATS = {
-  Beauty:      { tint: "#FFD6E8", color: "#E83E8C", emoji: "💄" },
-  Books:       { tint: "#F3E3C7", color: "#8A5A00", emoji: "📚" },
-  Electronics: { tint: "#D6E2FF", color: "#2F6BFF", emoji: "🔌" },
-  Fashion:     { tint: "#FFE0C7", color: "#E8700A", emoji: "👗" },
-  Home:        { tint: "#CDF2E0", color: "#128A5E", emoji: "🏠" },
-  Sports:      { tint: "#D6EEFF", color: "#5FB7FF", emoji: "⚽" },
-};
+// Shared helpers ($, money, esc, CATS, api, toast, ratingText) live in common.js.
 const FEATURED = "P021";
 
 // Anonymous ids: the user id persists in this browser, the session id lasts for the tab session.
@@ -27,24 +15,7 @@ let category = "All";
 let cart = JSON.parse(localStorage.getItem("ls_cart") || "{}"); // { productId: qty }
 let sent = Number(sessionStorage.getItem("ls_sent") || 0);
 
-// ------------------------------------------------ API
-const OFFLINE = "Can't reach the Lakeshop server. Is it running? Start it with `docker compose up -d` and try again.";
-
-async function api(path, body) {
-  let res;
-  try {
-    res = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
-  } catch {
-    throw new Error(OFFLINE); // network failure: fetch rejects with a bare "Failed to fetch"
-  }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const d = data.detail;
-    throw new Error(Array.isArray(d) ? d.map((x) => x.msg).join("; ") : d || `Request failed (${res.status})`);
-  }
-  return data;
-}
-
+// ------------------------------------------------ events
 async function track(event_type, product_id) {
   try {
     await api("/api/events", { event_type, product_id, user_id: USER, session_id: SESSION });
@@ -61,27 +32,17 @@ function bumpEvents(n, label) {
   if (label) $("#evt-last").innerHTML = `Last: <code>${esc(label)}</code>`;
 }
 
-function toast(msg) {
-  const t = $("#toast");
-  t.textContent = msg;
-  t.classList.add("show");
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => t.classList.remove("show"), 2200);
-}
-
 // ------------------------------------------------ catalog + search
-function stars(r) { return "★".repeat(Math.round(r)) + "☆".repeat(5 - Math.round(r)); }
-
 function productTile(p) {
   const c = CATS[p.category];
   const wide = p.badge === "Bestseller";
   return `
     <article class="tile product${wide ? " wide" : ""}" data-id="${p.id}" tabindex="0" role="button" aria-label="${esc(p.name)}, ${money.format(p.price)}">
-      <div class="art" style="background:${c.tint}">${p.emoji}${p.badge ? `<span class="badge">${esc(p.badge.toUpperCase())}</span>` : ""}</div>
+      <div class="art" style="background:${c.tint}">${esc(p.emoji)}${p.badge ? `<span class="badge">${esc(p.badge.toUpperCase())}</span>` : ""}</div>
       <div class="body">
         <span class="stripe" style="background:${c.color}" title="${p.category}"></span>
         <h3>${esc(p.name)}</h3>
-        <p class="rating">${stars(p.rating)} <span class="muted">${p.rating} · ${p.reviews.toLocaleString()}</span></p>
+        <p class="rating">${esc(ratingText(p))}</p>
         ${wide ? `<p class="desc">${esc(p.description)}</p>` : ""}
         <div class="foot">
           <p class="price">${money.format(p.price)}</p>
@@ -121,7 +82,7 @@ function openProduct(id) {
   $("#pd-art").style.background = CATS[p.category].tint;
   $("#pd-cat").textContent = p.category.toUpperCase();
   $("#pd-name").textContent = p.name;
-  $("#pd-rating").textContent = `${stars(p.rating)}  ${p.rating} · ${p.reviews.toLocaleString()} reviews`;
+  $("#pd-rating").textContent = p.reviews ? `${ratingText(p)} reviews` : ratingText(p);
   $("#pd-desc").textContent = p.description;
   $("#pd-price").textContent = money.format(p.price);
   $("#pd-qty").value = 1;
@@ -275,6 +236,8 @@ document.querySelectorAll("dialog").forEach((d) => d.addEventListener("click", (
   $("#hero-product").innerHTML = `${f.emoji}<span class="tag">${esc(f.name)} · ${money.format(f.price)}</span>`;
   $("#hero-product").onclick = $("#hero-cta").onclick = () => openProduct(FEATURED);
   $("#evt-count").textContent = sent;
+  const q = new URLSearchParams(location.search).get("q"); // deep link from the catalog admin
+  if (q) $("#search").value = q;
   renderCategories();
   render();
   saveCart();

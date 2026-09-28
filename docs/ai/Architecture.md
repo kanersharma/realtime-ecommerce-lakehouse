@@ -24,7 +24,7 @@ flowchart LR
 
 | Service | Image / build | Host port | Role | Resources |
 |---|---|---|---|---|
-| `shop` | `./shop` (python:3.12-slim, FastAPI 0.115, uvicorn) | 8000 | Storefront UI + API, produces events | ~60 MB |
+| `shop` | `./shop` (python:3.12-slim, FastAPI 0.115, uvicorn) | 8000 | Storefront + catalog admin UI and API; owns the catalog (SQLite); produces events | ~60 MB |
 | `generator` | `./generator` | – | Optional simulator (`--profile simulator`) | ~15 MB |
 | `kafka` | `apache/kafka:3.9.0` (KRaft) | 29092 (host listener) | Event log; in-network `kafka:9092` | heap 512 MB |
 | `kafka-init` | `apache/kafka:3.9.0` | – | One-shot: creates `clicks`, `orders` (3 partitions, 24 h retention) | – |
@@ -37,8 +37,9 @@ flowchart LR
 | `trino` | `trinodb/trino:470` | 8090 → 8080 | SQL over Iceberg | limit 1536 MB, heap 1 GB |
 | `dashboard` | `./dashboard` (Streamlit 1.41.1) | 8501 | Live dashboard | ~170 MB |
 
-Volumes: `s3-data` (RustFS) and `catalog-data` (the REST catalog's SQLite). Kafka has no volume, so
-`down` loses topics while Iceberg data survives. `down -v` wipes everything.
+Volumes: `shop-data` (the shop's catalog database, including admin-added products), `s3-data`
+(RustFS) and `catalog-data` (the Iceberg REST catalog's SQLite). Kafka has no volume, so `down`
+loses topics while Iceberg data and products survive. `down -v` wipes everything.
 
 ## 3. Request and event flow (checkout)
 
@@ -88,14 +89,28 @@ enforces it.
 
 | Method | Path | Body | Success | Errors |
 |---|---|---|---|---|
-| GET | `/api/products` | – | 200: catalog array | – |
+| GET | `/api/products` | – | 200: catalog array (seed first, then admin-added; `seed` flag) | – |
+| POST | `/api/products` | `{name, category, price, emoji, description, badge?}` | 201: product with the next `P###` id | 409 duplicate name, 422 validation (price decimals, emoji not in the category's picker, name characters) |
+| DELETE | `/api/products/{id}` | – | 204 | 403 seed product, 404 unknown |
+| GET | `/api/catalog/options` | – | 200: `{categories, emoji: {category: [..]}, badges}` | – |
 | POST | `/api/events` | `{event_type, product_id, user_id, session_id}` | 202 | 404 unknown product, 422 validation |
 | POST | `/api/checkout` | `{user_id, session_id, name, country, items[{product_id, quantity 1–10}] (1–20), payment{method, card_number?, expiry?, cvc?, upi_id?}}` | 200: `{order_ref, total, lines, paid_with}` | 402 payment failed, 404 unknown product, 422 validation |
-| GET | `/`, `/app.js`, `/styles.css` | – | static UI | – |
+| GET | `/` (store, `?q=` prefills search), `/admin.html` (catalog admin), `common.js`, `app.js`, `admin.js`, `styles.css` | – | static UI | – |
 
 Validation is pydantic at the boundary. **All** lines are priced before **any** event is published, so
 there are no partial orders. Without `KAFKA_BOOTSTRAP` the shop runs in *dry-run* mode and prints
 events to stdout.
+
+### Catalog storage
+The shop owns the catalog in SQLite (`SHOP_DB`, default `shop/data/shop.db`; `/data/shop.db` on the
+`shop-data` volume in Docker). Table `products(id, name, category, price, emoji, description, rating,
+reviews, badge, created_at)`, with a unique index on `lower(name)`. `created_at IS NULL` marks seed
+products. On first use in a process, `db()` creates the table and runs `INSERT OR IGNORE` for every
+seed product in `catalog/products.json`, so new seed products reach existing databases and nothing
+is overwritten. New ids are `P` + (max numeric id + 1), so deleted ids are not reused while higher
+ids exist. The simulator reads `GET /api/products` from the shop (`SHOP_URL`) and falls back to the
+seed file. Products are not yet events in the lakehouse; orders carry `product_name` and `category`,
+so the dashboard needs no join. (Phase 9 adds an `inventory` topic.)
 
 ## 6. Flink job ([`pipeline.sql`](../../flink/sql/pipeline.sql))
 - Sources: temporary Kafka tables `clicks_src` and `orders_src`, `json.ignore-parse-errors = true`,
@@ -156,8 +171,9 @@ tolerate that; see Rules R-SQL-1.
 
 ## 11. Repository map
 ```
-shop/            main.py (API + pure logic), static/ (index.html, styles.css, app.js), Dockerfile
-catalog/         products.json (shared catalog)
+shop/            main.py (API, catalog store, pure logic), static/ (index.html + app.js store,
+                 admin.html + admin.js catalog admin, common.js shared helpers, styles.css), Dockerfile
+catalog/         products.json (seed catalog: 48 products)
 generator/       generator.py (optional simulator)
 flink/           Dockerfile (connector jars), sql/pipeline.sql
 trino/           catalog/lakehouse.properties, jvm.config

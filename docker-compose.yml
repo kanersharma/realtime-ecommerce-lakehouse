@@ -68,15 +68,21 @@ services:
     depends_on: { kafka-init: { condition: service_completed_successfully } }
     environment:
       KAFKA_BOOTSTRAP: kafka:9092
-    volumes: ["./catalog/products.json:/catalog/products.json:ro"]
+      SHOP_DB: /data/shop.db  # catalog (seed + admin-added products); survives restarts
+    volumes:
+      - ./catalog/products.json:/catalog/products.json:ro
+      - shop-data:/data
 
   # Optional simulated background traffic: docker compose --profile simulator up -d
   generator:
     build: ./generator
     profiles: ["simulator"]
-    depends_on: { kafka-init: { condition: service_completed_successfully } }
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+      shop: { condition: service_started }
     environment:
       KAFKA_BOOTSTRAP: kafka:9092
+      SHOP_URL: http://shop:8000  # live catalog incl. admin-added products (seed file is the fallback)
       SESSIONS_PER_SEC: ${SESSIONS_PER_SEC:-20}
     volumes: ["./catalog/products.json:/catalog/products.json:ro"]
 
@@ -171,5 +177,6 @@ services:
       TRINO_PORT: 8080
 
 volumes:
+  shop-data:
   s3-data:
   catalog-data:
