@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lakeshop · demo store</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛒</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Space+Grotesk:wght@400;500;700&display=swap">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="demo-banner">
+    <strong>DEMO STORE</strong> · no real payments · every click streams to Kafka ·
+    <a href="http://localhost:8501" target="_blank" rel="noopener">open the live dashboard ↗</a>
+  </div>
+
+  <header class="topbar">
+    <a class="logo" href="/">LAKE<span>SHOP</span></a>
+    <label class="search">
+      <span aria-hidden="true">🔍</span>
+      <input id="search" type="search" placeholder="Search products, categories, descriptions…" autocomplete="off" aria-label="Search products">
+    </label>
+    <button id="cart-btn" class="btn btn-ink" aria-label="Open cart">🛒 Cart <span id="cart-count" class="count">0</span></button>
+  </header>
+
+  <main>
+    <!-- Intro bento -->
+    <section class="bento intro">
+      <article class="tile hero" id="hero">
+        <span class="pill">🔥 THIS WEEK'S DROP</span>
+        <div class="hero-body">
+          <div>
+            <h1>Shop like<br>a <mark>stream</mark>.</h1>
+            <p>Every view, add-to-cart and order you make here is an event: it flows through Kafka and Flink
+               into Iceberg and appears on the dashboard in about 15 seconds.</p>
+            <button class="btn btn-pink" id="hero-cta">View featured →</button>
+          </div>
+          <div class="hero-product" id="hero-product" aria-hidden="true"></div>
+        </div>
+      </article>
+
+      <article class="tile stats">
+        <span class="pill pill-ink">📡 LIVE EVENTS</span>
+        <p class="big" id="evt-count">0</p>
+        <p>events streamed from this browser session</p>
+        <p class="muted" id="evt-last">Open a product to send your first <code>page_view</code>.</p>
+        <div class="links">
+          <a href="http://localhost:8501" target="_blank" rel="noopener">Dashboard ↗</a>
+          <a href="http://localhost:8088" target="_blank" rel="noopener">Kafka UI ↗</a>
+        </div>
+      </article>
+
+      <article class="tile testcard">
+        <span class="pill">💳 TEST PAYMENTS</span>
+        <p><strong>4242 4242 4242 4242</strong> → approved</p>
+        <p><strong>4000 0000 0000 0002</strong> → declined</p>
+        <p class="muted">Any future expiry, any 3-digit CVC. UPI and cash on delivery work too. Real cards are always refused.</p>
+      </article>
+
+      <nav class="tile cats" id="cats" aria-label="Categories"></nav>
+    </section>
+
+    <div class="section-head">
+      <h2 id="results-title">All products</h2>
+      <span class="muted" id="results-count"></span>
+    </div>
+    <section class="bento products" id="products" aria-live="polite"></section>
+    <p class="empty" id="empty" hidden>No products match your search. Try “book” or “coffee”.</p>
+  </main>
+
+  <!-- Product detail -->
+  <dialog id="product-dlg" class="modal" aria-labelledby="pd-name">
+    <form method="dialog"><button class="close" aria-label="Close">✕</button></form>
+    <div class="pd">
+      <div class="pd-art" id="pd-art"></div>
+      <div class="pd-info">
+        <span class="pill" id="pd-cat"></span>
+        <h2 id="pd-name"></h2>
+        <p class="rating" id="pd-rating"></p>
+        <p id="pd-desc"></p>
+        <p class="price" id="pd-price"></p>
+        <div class="row">
+          <div class="stepper" role="group" aria-label="Quantity">
+            <button type="button" id="pd-minus" aria-label="Decrease">−</button>
+            <output id="pd-qty">1</output>
+            <button type="button" id="pd-plus" aria-label="Increase">+</button>
+          </div>
+          <button class="btn btn-pink" id="pd-add">Add to cart</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Cart drawer -->
+  <dialog id="cart-dlg" class="drawer" aria-labelledby="cart-title">
+    <form method="dialog"><button class="close" aria-label="Close">✕</button></form>
+    <h2 id="cart-title">Your cart</h2>
+    <div id="cart-lines"></div>
+    <div class="cart-foot">
+      <div class="row between"><span>Subtotal</span><strong id="cart-subtotal">$0.00</strong></div>
+      <div class="row between muted"><span>Shipping</span><span>Free · demo store</span></div>
+      <button class="btn btn-pink wide" id="to-checkout">Checkout →</button>
+    </div>
+  </dialog>
+
+  <!-- Checkout -->
+  <dialog id="checkout-dlg" class="modal" aria-labelledby="co-title">
+    <form method="dialog"><button class="close" aria-label="Close">✕</button></form>
+    <form id="co-form" class="checkout" novalidate>
+      <h2 id="co-title">Checkout</h2>
+      <fieldset>
+        <legend>1 · Shipping</legend>
+        <label>Full name <input name="name" required maxlength="80" placeholder="Ada Lovelace"></label>
+        <label>Country
+          <select name="country">
+            <option value="IN">🇮🇳 India</option><option value="US">🇺🇸 United States</option>
+            <option value="GB">🇬🇧 United Kingdom</option><option value="DE">🇩🇪 Germany</option>
+            <option value="BR">🇧🇷 Brazil</option><option value="JP">🇯🇵 Japan</option>
+            <option value="AU">🇦🇺 Australia</option><option value="CA">🇨🇦 Canada</option>
+          </select>
+        </label>
+      </fieldset>
+      <fieldset>
+        <legend>2 · Payment <span class="pill pill-ink small">TEST MODE</span></legend>
+        <div class="methods" role="radiogroup">
+          <label><input type="radio" name="method" value="card" checked> 💳 Card</label>
+          <label><input type="radio" name="method" value="upi"> 📱 UPI</label>
+          <label><input type="radio" name="method" value="cod"> 💵 Cash on delivery</label>
+        </div>
+        <!-- autocomplete="off" and non-standard names keep the browser from offering saved real cards -->
+        <div class="pay card-fields">
+          <label>Test card number <input name="demo_card" inputmode="numeric" autocomplete="off" placeholder="4242 4242 4242 4242" maxlength="23"></label>
+          <div class="row">
+            <label>Expiry <input name="demo_exp" autocomplete="off" placeholder="MM/YY" maxlength="5"></label>
+            <label>CVC <input name="demo_cvc" inputmode="numeric" autocomplete="off" placeholder="123" maxlength="4"></label>
+          </div>
+          <button type="button" class="btn small" id="fill-test">Fill test card</button>
+        </div>
+        <div class="pay upi-fields" hidden>
+          <label>UPI ID <input name="upi" autocomplete="off" placeholder="yourname@okbank"></label>
+        </div>
+        <div class="pay cod-fields" hidden><p class="muted">Pay when it (doesn't) arrive. It's a demo.</p></div>
+      </fieldset>
+      <p class="error" id="co-error" role="alert" hidden></p>
+      <button class="btn btn-pink wide" id="pay-btn" type="submit">Pay</button>
+    </form>
+    <div class="success" id="co-success" hidden>
+      <p class="big">🎉</p>
+      <h2>Order placed!</h2>
+      <p id="co-summary"></p>
+      <p>Your order events are on their way through Kafka → Flink → Iceberg.</p>
+      <a class="btn btn-pink" href="http://localhost:8501" target="_blank" rel="noopener">Watch it land on the dashboard ↗</a>
+    </div>
+  </dialog>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>

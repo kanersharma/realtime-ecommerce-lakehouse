@@ -4,7 +4,8 @@ Context for AI coding assistants working on this repository. Read this before ch
 
 ## What this is
 A local, Docker Compose–based **streaming lakehouse** portfolio project:
-`generator (Python) → Kafka → Flink SQL → Apache Iceberg (REST catalog, S3 on RustFS) → Trino → Streamlit`.
+`Lakeshop storefront (FastAPI + bento UI) → Kafka → Flink SQL → Apache Iceberg (REST catalog, S3 on RustFS) → Trino → Streamlit`.
+An optional simulator (`generator/`) can add background traffic.
 It has two goals: be easy to run (`docker compose up -d --build`) and show senior-level data
 engineering (event time, watermarks, exactly-once, table maintenance, time travel).
 
@@ -14,7 +15,8 @@ engineering (event time, watermarks, exactly-once, table maintenance, time trave
 | kafka | apache/kafka:3.9.0 | 29092 (host listener) | KRaft single node. In-network address: `kafka:9092` |
 | kafka-init | apache/kafka:3.9.0 | – | one-shot: creates topics `clicks`, `orders` (3 partitions) |
 | kafka-ui | kafbat/kafka-ui:v1.1.0 | 8088→8080 | optional, ~300 MB RAM |
-| generator | ./generator | – | env `SESSIONS_PER_SEC` (default 20) |
+| shop | ./shop | 8000 | Lakeshop storefront + API; produces to `clicks` / `orders`. `KAFKA_BOOTSTRAP` unset = dry run (prints events) |
+| generator | ./generator | – | **opt-in**: `--profile simulator`; env `SESSIONS_PER_SEC` (default 20) |
 | rustfs | rustfs/rustfs:1.0.0 | 9000 (S3), 9001 (console) | creds `admin` / `password` |
 | s3-init | amazon/aws-cli | – | one-shot: creates bucket `warehouse` |
 | iceberg-rest | apache/iceberg-rest-fixture:1.8.1 | 8181 | JDBC catalog on SQLite at `/home/iceberg/catalog.db` (volume) |
@@ -34,6 +36,11 @@ The catalog name `lakehouse` and schema `shop` are the same in Flink and Trino. 
   `flink-shaded-hadoop-2-uber` is required because Iceberg's Flink catalog references
   `org.apache.hadoop.conf.Configuration`, even with a REST catalog.
 - `trino/catalog/lakehouse.properties`: Iceberg REST + native S3 (`fs.native-s3.enabled`).
+- `catalog/products.json`: the single product catalog, mounted at `/catalog/products.json` into shop and
+  generator. Both load it as `Path(__file__).parent.parent / "catalog" / "products.json"`. Keep the six
+  categories in sync with `CATEGORY_COLORS` (dashboard) and `CATS` (shop/static/app.js).
+- `shop/main.py`: pure functions `authorize`, `click_event`, `order_events` (tested in `shop/test_shop.py`)
+  plus the FastAPI routes. `shop/static/`: no-build UI (index.html, styles.css, app.js).
 - `generator/generator.py`: `session_events(now, rng)` is pure and tested; `main()` does Kafka I/O.
 - `dashboard/app.py`: all SQL is in module-level constants; `query(sql) -> (DataFrame, ms)`.
 
@@ -45,6 +52,9 @@ docker compose up -d --build dashboard        # rebuild one service after editin
 docker compose run --rm flink-job             # submit pipeline.sql (no-op if a job is already running)
 docker compose exec trino trino --catalog lakehouse --schema shop   # SQL shell
 python generator/test_generator.py            # generator self-check (no Kafka needed)
+cd shop && python test_shop.py                # storefront self-check (no Kafka needed)
+cd shop && uvicorn main:app --port 8000       # UI without Docker: events are printed (dry run)
+docker compose --profile simulator up -d      # add simulated background traffic
 curl -s localhost:8081/jobs/overview          # Flink job state
 ```
 To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
@@ -62,6 +72,13 @@ To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
 - All timestamps are **UTC, timezone-naive** `TIMESTAMP(3)`. The generator emits
   `yyyy-MM-dd HH:mm:ss.SSS` (Flink JSON `SQL` format); the dashboard sets the Trino session to UTC,
   so `localtimestamp` is "now in UTC". Don't introduce `TIMESTAMP_LTZ` or `Z` suffixes without changing all three.
+- **Event contract**: shop and generator emit exactly the columns declared in `pipeline.sql`
+  (`clicks_src`, `orders_src`). Adding a field means changing all three plus the Iceberg DDL.
+  One order event per cart line: `orders` has one product per row.
+- **The shop server owns money and identity**: prices, totals, order ids and `event_time` are set in
+  `main.py` from the catalog, never taken from the browser. Validate every request with pydantic models.
+- **Payments are fake**: only the `TEST_CARDS` numbers may succeed, card inputs keep `autocomplete="off"`
+  with non-standard names, and card data must never be logged, stored or put in an event.
 - Flink DDL must stay idempotent (`CREATE ... IF NOT EXISTS`).
 - Gold tables must stay **append-only** (window TVF aggregations). A regular `GROUP BY` without
   windows produces updates and would need an upsert-enabled Iceberg v2 table with a primary key.

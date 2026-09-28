@@ -16,6 +16,7 @@ import trino
 TABLES = ["orders", "clicks", "revenue_per_minute", "funnel_per_minute"]
 READ_ONLY = ("select", "with", "show", "describe", "explain")
 LINKS = {
+    "🛒 Lakeshop (make real events)": "http://localhost:8000",
     "Flink UI (jobs, checkpoints)": "http://localhost:8081",
     "Kafka UI (topics, messages)": "http://localhost:8088",
     "Trino UI (queries)": "http://localhost:8090",
@@ -260,9 +261,9 @@ ORDER BY 2 DESC
 
 def waiting(err):
     st.info(
-        "⏳ **Waiting for data.** The Flink job creates the Iceberg tables on startup and "
-        "commits data on every checkpoint (10 s). The first windowed aggregates appear "
-        "~1 minute later. This page refreshes on its own."
+        "⏳ **Waiting for data.** Go shop at [Lakeshop](http://localhost:8000) (or start the "
+        "simulator with `docker compose --profile simulator up -d`). Flink commits to Iceberg every "
+        "10 s, and the first windowed aggregates appear ~1 minute later. This page refreshes on its own."
     )
     with st.expander("Details"):
         code(str(err))
@@ -302,7 +303,7 @@ st.markdown("""
   <h1>Real-time E-commerce <span class="mark">Lakehouse</span></h1>
   <p>Every number on this page is a live SQL query against Apache Iceberg tables that a
      Flink job writes every 10 seconds. Open any 🔍 to see the exact query.</p>
-  <div class="chips"><span>KAFKA</span>→<span>FLINK SQL</span>→<span>APACHE ICEBERG</span>→<span>TRINO</span>→<span>YOU</span></div>
+  <div class="chips"><span>LAKESHOP</span>→<span>KAFKA</span>→<span>FLINK SQL</span>→<span>APACHE ICEBERG</span>→<span>TRINO</span>→<span>YOU</span></div>
 </div>
 """, unsafe_allow_html=True)
 

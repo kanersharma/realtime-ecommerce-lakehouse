@@ -1,4 +1,4 @@
-"""Simulated e-commerce traffic -> Kafka topics `clicks` and `orders`.
+"""Simulated e-commerce traffic -> Kafka topics `clicks` and `orders` (optional background load).
 
 Each shopping session is a small funnel: 1-5 page views, each may become an
 add-to-cart, each cart may become an order. Traffic follows a 10-minute sine
@@ -12,27 +12,13 @@ import random
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-PRODUCTS = [  # (product_id, name, category, unit_price)
-    ("P001", "Wireless Earbuds", "Electronics", 59.99),
-    ("P002", "4K Monitor", "Electronics", 329.00),
-    ("P003", "Mechanical Keyboard", "Electronics", 89.50),
-    ("P004", "USB-C Hub", "Electronics", 34.99),
-    ("P005", "Running Shoes", "Fashion", 120.00),
-    ("P006", "Denim Jacket", "Fashion", 75.00),
-    ("P007", "Cotton T-Shirt", "Fashion", 15.99),
-    ("P008", "Leather Wallet", "Fashion", 45.00),
-    ("P009", "Coffee Grinder", "Home", 49.00),
-    ("P010", "Air Purifier", "Home", 179.99),
-    ("P011", "Desk Lamp", "Home", 29.99),
-    ("P012", "Yoga Mat", "Sports", 25.00),
-    ("P013", "Dumbbell Set", "Sports", 99.00),
-    ("P014", "Cycling Helmet", "Sports", 65.00),
-    ("P015", "Data Engineering Book", "Books", 42.00),
-    ("P016", "Sci-Fi Novel", "Books", 12.99),
-    ("P017", "Face Serum", "Beauty", 28.50),
-    ("P018", "Sunscreen SPF50", "Beauty", 14.00),
-]
+# Shared with the storefront (shop/), so simulated and real events use the same products.
+# Repo: catalog/products.json; container: /catalog/products.json (mounted by docker-compose).
+CATALOG = Path(__file__).resolve().parent.parent / "catalog" / "products.json"
+PRODUCTS = [(p["id"], p["name"], p["category"], p["price"])  # (product_id, name, category, unit_price)
+            for p in json.loads(CATALOG.read_text(encoding="utf-8"))]
 COUNTRIES = {"IN": 30, "US": 25, "GB": 10, "DE": 10, "BR": 8, "JP": 7, "AU": 5, "CA": 5}
 PAYMENTS = {"card": 55, "upi": 20, "wallet": 15, "cod": 10}
 

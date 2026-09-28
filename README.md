@@ -2,7 +2,8 @@
 
 **Kafka → Flink SQL → Apache Iceberg → Trino → Streamlit, on your laptop with one command.**
 
-A simulated online shop streams clickstream and order events into Kafka. Flink SQL turns them into
+**Lakeshop**, a real demo storefront with search, a cart and fake checkout, streams every click and
+order into Kafka (an optional simulator can add background traffic). Flink SQL turns them into
 exactly-once Apache Iceberg tables on S3-compatible storage. Trino queries those tables, and a live
 dashboard shows revenue, the conversion funnel and top products, plus the lakehouse internals
 (snapshots, small files, compaction, time travel) that usually stay hidden.
@@ -19,7 +20,8 @@ production streaming lakehouse works:
 
 | Concern | How it's handled here |
 |---|---|
-| **Event time, not arrival time** | Watermarks (`event_time - 5 s`) tolerate out-of-order events; the generator deliberately produces them |
+| **Real events, not just a mock** | A storefront UI emits `page_view`, `add_to_cart` and `order` events; the server owns prices, ids and timestamps |
+| **Event time, not arrival time** | Watermarks (`event_time - 5 s`) tolerate out-of-order events; the simulator deliberately produces them |
 | **Exactly-once into the lake** | Flink checkpoints (10 s) drive atomic Iceberg commits: no duplicates, no partial files visible |
 | **Streaming aggregations** | 1-minute tumbling windows with the window TVF API, executed as two-phase (local → global) aggregation |
 | **Open table format** | Apache Iceberg v2 tables behind a REST catalog, Parquet + zstd, partitioned by day |
@@ -34,7 +36,9 @@ production streaming lakehouse works:
 
 ```mermaid
 flowchart LR
-    G["🛒 Generator<br/>(Python)"] -- "JSON, key=user_id" --> K[("Kafka<br/>clicks · orders")]
+    U(("🧑 Shopper")) --> S["🛒 Lakeshop<br/>FastAPI + bento UI"]
+    S -- "JSON, key=user_id" --> K[("Kafka<br/>clicks · orders")]
+    G["🤖 Simulator<br/>(optional)"] -.-> K
     K --> F["Flink SQL<br/>watermarks · windows<br/>checkpoint every 10s"]
     F -- "commit per checkpoint" --> I[("Apache Iceberg<br/>Parquet on S3 (RustFS)")]
     C["Iceberg REST<br/>catalog"] -.metadata.- F
@@ -45,6 +49,7 @@ flowchart LR
 
 | Layer | Tech | Role |
 |---|---|---|
+| Produce | **FastAPI** + vanilla JS storefront | Real user events: product views, add-to-cart, checkout |
 | Ingest | **Apache Kafka 3.9** (KRaft, no ZooKeeper) | Durable, partitioned event log (3 partitions per topic) |
 | Process | **Apache Flink 1.20** (SQL) | Streaming ETL and windowed aggregation, exactly-once |
 | Table format | **Apache Iceberg 1.8** (REST catalog) | ACID tables, snapshots, schema evolution, time travel |
@@ -67,7 +72,7 @@ lakehouse.shop
 ## Quick start
 
 **Prerequisites:** Docker Desktop (or Docker Engine + Compose v2) with **≥ 6 GB of memory** allocated,
-and free ports 8081, 8088, 8090, 8181, 8501, 9000, 9001 and 29092.
+and free ports 8000, 8081, 8088, 8090, 8181, 8501, 9000, 9001 and 29092.
 
 ```bash
 git clone https://github.com/<you>/realtime-ecommerce-lakehouse.git
@@ -75,12 +80,19 @@ cd realtime-ecommerce-lakehouse
 docker compose up -d --build
 ```
 
-The first build downloads ~1.5 GB of images. After that, open **http://localhost:8501**.
+The first build downloads ~1.5 GB of images. Then open the store at **http://localhost:8000** and the
+dashboard at **http://localhost:8501** side by side, and go shopping.
+
+Want the charts busy without clicking? Add simulated background traffic:
+
+```bash
+docker compose --profile simulator up -d
+```
 
 | When | What you'll see |
 |---|---|
 | ~1 min | Services healthy; the Flink job is submitted automatically |
-| +10 s | First checkpoint → first Iceberg commit → KPIs appear |
+| +10 s after your first click | First checkpoint → first Iceberg commit → KPIs appear |
 | +~65 s | First 1-minute window closes → revenue chart appears |
 
 Stop it with `docker compose down`, or wipe all data with `docker compose down -v`.
@@ -89,7 +101,8 @@ Stop it with `docker compose down`, or wipe all data with `docker compose down -
 
 | URL | What to look at |
 |---|---|
-| http://localhost:8501 | **Dashboard**: live business view, lakehouse internals, SQL playground |
+| http://localhost:8000 | **Lakeshop**: the storefront that produces the events (test card `4242 4242 4242 4242`) |
+| http://localhost:8501 | **Dashboard**: live business view, lakehouse internals, SQL playground (`?theme=dark` for dark mode) |
 | http://localhost:8081 | **Flink**: job graph, checkpoints (size and duration), backpressure, watermarks |
 | http://localhost:8088 | **Kafka UI**: topics, partitions, consumer lag, live messages |
 | http://localhost:8090 | **Trino**: query history and execution plans |
@@ -99,27 +112,48 @@ Stop it with `docker compose down`, or wipe all data with `docker compose down -
 
 ## A guided tour (5 minutes)
 
-1. **Dashboard → 📈 Live Business.** Revenue follows a 10-minute sine wave. Open any **🔍 SQL**
-   expander to see the exact Trino query and how long it took.
-2. **Flink UI → Running Jobs → ecommerce-lakehouse.** There's one job with four sinks. Notice:
+1. **Lakeshop.** Search for "book", open a product (a `page_view`), add it to the cart (`add_to_cart`)
+   and check out with the test card `4242 4242 4242 4242`. The **📡 Live events** tile counts what you
+   sent, and you can watch the messages arrive in Kafka UI.
+2. **Dashboard → 📈 Live Business.** About 15 s later your order is in the KPIs, the funnel and top
+   products. Open any **🔍 SQL** expander to see the exact Trino query and how long it took.
+3. **Flink UI → Running Jobs → ecommerce-lakehouse.** There's one job with four sinks. Notice:
    - both Kafka sources are **reused** across the raw and aggregated sinks (one read per topic);
    - windows run as `LocalWindowAggregate → GlobalWindowAggregate` (two-phase, which cuts shuffle volume);
    - **Checkpoints**: one completes every ~10 s, and each one is an Iceberg commit.
-3. **Dashboard → 🔬 Lakehouse Internals.** Every checkpoint adds a snapshot and more small
+4. **Dashboard → 🔬 Lakehouse Internals.** Every checkpoint adds a snapshot and more small
    files. Press **🧹 Compact now**: Trino's `OPTIMIZE` rewrites them into fewer files while Flink keeps
    writing (Iceberg optimistic concurrency).
-4. **Time travel.** Drag the snapshot slider to see the row count at any past commit.
-5. **🧪 SQL Playground.** Try the *Cart abandonment by category* example, a join across two Iceberg
+5. **Time travel.** Drag the snapshot slider to see the row count at any past commit.
+6. **🧪 SQL Playground.** Try the *Cart abandonment by category* example, a join across two Iceberg
    tables written by a streaming job and read by a batch engine.
-6. **RustFS console → `warehouse` bucket.** The lake is just files: `data/*.parquet` plus
+7. **RustFS console → `warehouse` bucket.** The lake is just files: `data/*.parquet` plus
    `metadata/*.json | *.avro`.
 
 ---
 
 ## How it works
 
-### Event generation: [`generator/generator.py`](generator/generator.py)
-Each simulated session is a funnel: 1–5 page views, each with a 25 % chance of add-to-cart, and
+### The storefront: [`shop/`](shop/)
+A FastAPI app serves a no-build bento-grid UI (plain HTML/CSS/JS with native `<dialog>`s) and three endpoints:
+
+| Endpoint | Emits | Notes |
+|---|---|---|
+| `GET /api/products` | – | Catalog from [`catalog/products.json`](catalog/products.json), shared with the simulator |
+| `POST /api/events` | `clicks` | `page_view` when a product opens, `add_to_cart` on add |
+| `POST /api/checkout` | `orders` | Fake payment, then **one order event per cart line** (the grain of the `orders` table) |
+
+The browser only sends product ids and quantities, so **prices, totals, ids and timestamps are set on
+the server** and a client can't tamper with them. Anonymous `user_id` (per browser) and `session_id`
+(per tab) link a shopper's views, carts and orders, which makes the dashboard's funnel and
+conversion rate real. Events use exactly the pipeline's JSON schema, so Flink needed no changes.
+
+**Payments are fake by design.** Only published test numbers work (`4242…` approves; `…0002` and
+`…9995` decline). Any other card number is refused, card fields opt out of browser autofill, and card
+data is never stored, logged or sent to Kafka. UPI and cash on delivery are also simulated.
+
+### Simulated traffic (optional): [`generator/generator.py`](generator/generator.py)
+Enabled with `--profile simulator`. Each simulated session is a funnel: 1–5 page views, each with a 25 % chance of add-to-cart, and
 each cart with a 40 % chance of becoming an order. Messages are **keyed by `user_id`**, so one user's
 events land in the same partition in order. Event times are backdated up to 3 s, so arrival order ≠
 event order. That's realistic, and it exercises the watermark. The Kafka producer runs with
@@ -166,7 +200,7 @@ statistics let Trino skip files outside the window.
 | Flink parallelism and slots | `docker-compose.yml` → `FLINK_PROPERTIES` | `2` / `4` |
 
 ```bash
-SESSIONS_PER_SEC=100 docker compose up -d generator   # 5x the traffic
+SESSIONS_PER_SEC=100 docker compose --profile simulator up -d generator   # 5x the simulated traffic
 ```
 
 ## Querying from your own tools
@@ -196,15 +230,20 @@ ALTER TABLE orders EXECUTE optimize;
 
 ```
 .
-├── docker-compose.yml          # the whole platform: 9 services + 3 one-shot init jobs
+├── docker-compose.yml          # the whole platform: 10 services + 3 one-shot init jobs (+ optional simulator)
 ├── flink/
 │   ├── Dockerfile              # Flink 1.20 + Kafka connector + Iceberg runtime + AWS bundle + Hadoop
 │   └── sql/pipeline.sql        # ★ the streaming pipeline (sources, catalog, tables, inserts)
 ├── trino/
 │   ├── catalog/lakehouse.properties   # Trino → Iceberg REST catalog + S3
 │   └── jvm.config              # fixed 1 GB heap (prevents OOM-kill in a 1.5 GB container)
+├── shop/
+│   ├── main.py                 # storefront API: catalog, click events, fake checkout -> Kafka
+│   ├── static/                 # bento UI: index.html, styles.css, app.js (no build step)
+│   └── test_shop.py            # self-check: cd shop && python test_shop.py
+├── catalog/products.json       # 24 fake products, shared by shop and simulator
 ├── generator/
-│   ├── generator.py            # event simulator
+│   ├── generator.py            # optional traffic simulator (--profile simulator)
 │   └── test_generator.py       # self-check: python generator/test_generator.py
 ├── dashboard/
 │   └── app.py                  # Streamlit app
@@ -249,7 +288,7 @@ These are deliberate simplifications for a laptop demo, each with its production
 
 ## Tech stack
 
-`Apache Kafka 3.9` · `Apache Flink 1.20` · `Apache Iceberg 1.8.1` · `Trino 470` · `RustFS 1.0` · `Python 3.12` · `Streamlit 1.41` · `Docker Compose`
+`FastAPI` · `Apache Kafka 3.9` · `Apache Flink 1.20` · `Apache Iceberg 1.8.1` · `Trino 470` · `RustFS 1.0` · `Python 3.12` · `Streamlit 1.41` · `Docker Compose`
 
 ## License
 
