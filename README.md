@@ -6,7 +6,8 @@
 order into Kafka (an optional simulator can add background traffic). Flink SQL turns them into
 exactly-once Apache Iceberg tables on S3-compatible storage. Trino queries those tables, and a live
 dashboard shows revenue, the conversion funnel and top products, plus the lakehouse internals
-(snapshots, small files, compaction, time travel) that usually stay hidden.
+(snapshots, small files, compaction, time travel) that usually stay hidden. Orders consume real stock,
+and an inventory view forecasts demand from the sales stream and suggests what to reorder.
 
 <table>
   <tr>
@@ -26,13 +27,15 @@ dashboard shows revenue, the conversion funnel and top products, plus the lakeho
 | ![Products](docs/screenshots/store-products.png) | ![Product](docs/screenshots/store-product.png) | ![Cart](docs/screenshots/store-cart.png) |
 | **Test-mode checkout** | **Declined card: no order event** | **Order placed** |
 | ![Checkout](docs/screenshots/store-checkout.png) | ![Declined](docs/screenshots/store-declined.png) | ![Success](docs/screenshots/store-success.png) |
-| **Dashboard, dark mode** | **Lakehouse internals** | **SQL playground** |
-| ![Dark](docs/screenshots/dashboard-dark.png) | ![Internals](docs/screenshots/dashboard-internals.png) | ![SQL](docs/screenshots/dashboard-sql.png) |
-| **Catalog admin** | **Add a product (emoji picker + live preview)** | **Mobile store** |
-| ![Catalog admin](docs/screenshots/admin-catalog.png) | ![Add product](docs/screenshots/admin-add.png) | <img src="docs/screenshots/store-mobile.png" width="200" alt="Mobile"> |
+| **📦 Inventory: forecast + reorder suggestions** | **Lakehouse internals** | **SQL playground** |
+| ![Inventory](docs/screenshots/dashboard-inventory.png) | ![Internals](docs/screenshots/dashboard-internals.png) | ![SQL](docs/screenshots/dashboard-sql.png) |
+| **Dashboard, dark mode** | **Catalog admin** | **Restock and reorder settings** |
+| ![Dark](docs/screenshots/dashboard-dark.png) | ![Catalog admin](docs/screenshots/admin-catalog.png) | ![Stock dialog](docs/screenshots/admin-stock.png) |
+| **Add a product (emoji picker + live preview)** | **Search** | **Mobile store** |
+| ![Add product](docs/screenshots/admin-add.png) | ![Search](docs/screenshots/store-search.png) | <img src="docs/screenshots/store-mobile.png" width="200" alt="Mobile"> |
 
-Regenerate them any time with `.venv/Scripts/python scripts/demo.py` (it sends real shopper traffic
-through the store, then captures both apps).
+Regenerate them any time with `docker compose run --rm demo` (it sends real shopper traffic through
+the store, then captures both apps; only Docker needed).
 
 ---
 
@@ -52,6 +55,7 @@ production streaming lakehouse works:
 | **Lake maintenance** | Visible small-files problem, plus one-click `OPTIMIZE` compaction from the UI |
 | **Time travel** | Query any table as of any snapshot (`FOR VERSION AS OF`) |
 | **Operability** | Every chart shows its SQL and latency; Flink, Kafka, Trino and S3 UIs are all exposed |
+| **Transactions next to analytics** | Stock lives in the shop's database (atomic, never oversold); every stock movement streams into Iceberg, where the dashboard forecasts demand and suggests reorders |
 
 ---
 
@@ -60,14 +64,16 @@ production streaming lakehouse works:
 ```mermaid
 flowchart LR
     U(("🧑 Shopper")) --> S["🛒 Lakeshop<br/>FastAPI + bento UI"]
-    S -- "JSON, key=user_id" --> K[("Kafka<br/>clicks · orders")]
-    G["🤖 Simulator<br/>(optional)"] -.-> K
+    S -- "JSON events" --> K[("Kafka<br/>clicks · orders · inventory")]
+    G["🤖 Simulator<br/>(optional)"] -.->|clicks| K
+    G -.->|checkouts| S
     K --> F["Flink SQL<br/>watermarks · windows<br/>checkpoint every 10s"]
     F -- "commit per checkpoint" --> I[("Apache Iceberg<br/>Parquet on S3 (RustFS)")]
     C["Iceberg REST<br/>catalog"] -.metadata.- F
     C -.metadata.- T
     I --> T["Trino"]
     T --> D["📊 Streamlit<br/>dashboard"]
+    D -.->|restock via the shop API| S
 ```
 
 | Layer | Tech | Role |
@@ -86,6 +92,7 @@ flowchart LR
 lakehouse.shop
 ├── clicks               bronze  raw page_view / add_to_cart events    PARTITIONED BY event_date
 ├── orders               bronze  raw orders                            PARTITIONED BY event_date
+├── inventory_movements  bronze  every stock change (order, restock, …) PARTITIONED BY event_date
 ├── revenue_per_minute   gold    1-min tumbling window × category      orders, units, revenue
 └── funnel_per_minute    gold    1-min tumbling window                 sessions, page views, carts
 ```
@@ -125,8 +132,8 @@ Stop it with `docker compose down`, or wipe all data with `docker compose down -
 | URL | What to look at |
 |---|---|
 | http://localhost:8000 | **Lakeshop**: the storefront that produces the events (test card `4242 4242 4242 4242`) |
-| http://localhost:8000/admin.html | **Catalog admin**: list, search and add products (with an emoji picker) |
-| http://localhost:8501 | **Dashboard**: live business view, lakehouse internals, SQL playground (`?theme=dark` for dark mode) |
+| http://localhost:8000/admin.html | **Catalog admin**: list, search and add products (with an emoji picker), restock |
+| http://localhost:8501 | **Dashboard**: live business view, inventory, lakehouse internals, SQL playground (`?theme=dark` for dark mode) |
 | http://localhost:8081 | **Flink**: job graph, checkpoints (size and duration), backpressure, watermarks |
 | http://localhost:8088 | **Kafka UI**: topics, partitions, consumer lag, live messages |
 | http://localhost:8090 | **Trino**: query history and execution plans |
@@ -141,17 +148,20 @@ Stop it with `docker compose down`, or wipe all data with `docker compose down -
    sent, and you can watch the messages arrive in Kafka UI.
 2. **Dashboard → 📈 Live Business.** About 15 s later your order is in the KPIs, the funnel and top
    products. Open any **🔍 SQL** expander to see the exact Trino query and how long it took.
-3. **Flink UI → Running Jobs → ecommerce-lakehouse.** There's one job with four sinks. Notice:
-   - both Kafka sources are **reused** across the raw and aggregated sinks (one read per topic);
+3. **Dashboard → 📦 Inventory.** Your order took stock in the shop, and the stock movement streamed into
+   Iceberg too. Products running low get a reorder suggestion from a demand forecast. Press
+   **Restock**: the dashboard calls the shop, and the new stock comes back through Kafka and Flink in about 10 s.
+4. **Flink UI → Running Jobs → ecommerce-lakehouse.** There's one job with five sinks. Notice:
+   - the `clicks` and `orders` sources are **reused** across the raw and aggregated sinks (one read per topic);
    - windows run as `LocalWindowAggregate → GlobalWindowAggregate` (two-phase, which cuts shuffle volume);
    - **Checkpoints**: one completes every ~10 s, and each one is an Iceberg commit.
-4. **Dashboard → 🔬 Lakehouse Internals.** Every checkpoint adds a snapshot and more small
+5. **Dashboard → 🔬 Lakehouse Internals.** Every checkpoint adds a snapshot and more small
    files. Press **🧹 Compact now**: Trino's `OPTIMIZE` rewrites them into fewer files while Flink keeps
    writing (Iceberg optimistic concurrency).
-5. **Time travel.** Drag the snapshot slider to see the row count at any past commit.
-6. **🧪 SQL Playground.** Try the *Cart abandonment by category* example, a join across two Iceberg
+6. **Time travel.** Drag the snapshot slider to see the row count at any past commit.
+7. **🧪 SQL Playground.** Try the *Cart abandonment by category* example, a join across two Iceberg
    tables written by a streaming job and read by a batch engine.
-7. **RustFS console → `warehouse` bucket.** The lake is just files: `data/*.parquet` plus
+8. **RustFS console → `warehouse` bucket.** The lake is just files: `data/*.parquet` plus
    `metadata/*.json | *.avro`.
 
 ---
@@ -159,14 +169,15 @@ Stop it with `docker compose down`, or wipe all data with `docker compose down -
 ## How it works
 
 ### The storefront: [`shop/`](shop/)
-A FastAPI app serves a no-build bento-grid UI (plain HTML/CSS/JS with native `<dialog>`s) and three endpoints:
+A FastAPI app serves a no-build bento-grid UI (plain HTML/CSS/JS with native `<dialog>`s) and a small JSON API:
 
 | Endpoint | Emits | Notes |
 |---|---|---|
 | `GET /api/products` | – | The catalog: seed products from [`catalog/products.json`](catalog/products.json) plus admin-added ones |
 | `POST /api/products` · `DELETE /api/products/{id}` | – | Add a product; delete an admin-added one (seed products are protected) |
 | `POST /api/events` | `clicks` | `page_view` when a product opens, `add_to_cart` on add |
-| `POST /api/checkout` | `orders` | Fake payment, then **one order event per cart line** (the grain of the `orders` table) |
+| `POST /api/checkout` | `orders`, `inventory` | Fake payment and stock check, then **one order event per cart line** (the grain of the `orders` table) and one stock movement per product |
+| `POST /api/products/{id}/restock` · `PUT /api/products/{id}/inventory` | `inventory` | Add stock; set lead time and target cover |
 
 **Catalog admin** (`/admin.html`, or the 🗂️ Catalog button): browse all products and **add new ones**
 with a name, category, price, badge, description and an emoji "photo" from a per-category picker,
@@ -183,8 +194,31 @@ conversion rate real. Events use exactly the pipeline's JSON schema, so Flink ne
 `…9995` decline). Any other card number is refused, card fields opt out of browser autofill, and card
 data is never stored, logged or sent to Kafka. UPI and cash on delivery are also simulated.
 
+### Inventory and demand forecasting
+The **shop is the system of record for stock** (SQLite in WAL mode). A checkout reads and decrements
+stock inside one `BEGIN IMMEDIATE` transaction, so concurrent shoppers can't oversell the last unit
+(a 25-thread race test proves it). If any line is short, the whole order is refused with a clear
+message ("Only 3 left of Knit Scarf") and nothing is emitted. Every change is written to a
+`stock_movements` ledger and, after the commit, published to the `inventory` topic. Flink lands it
+in the bronze table `inventory_movements`; current stock is the latest movement per product.
+
+The dashboard's **📦 Inventory** tab turns sales into decisions:
+
+| Step | How |
+|---|---|
+| Daily demand | Trino buckets bronze `orders` into days and **zero-fills** the gaps (a day without sales is a 0, not a missing row) |
+| Forecast | EWMA level (decay 0.7) + linear trend (`regr_slope`) over the lead time; a sold-out product's zeros are censored demand, so it uses at least the plain average |
+| Safety stock | 1.65 × σ(daily demand) × √lead time (≈ 95 % service level) |
+| Reorder point | forecast × lead time + safety stock |
+| Suggested quantity | forecast × (lead time + target cover) + safety stock − on hand |
+
+Lead time and target cover are set per product in the admin (📦). A demo **day is 60 s**
+(`DEMO_DAY_SECONDS`), so a few minutes of traffic show trends, stock-outs and reorders. **Restock**
+buttons call the shop's API; the dashboard itself never writes stock.
+
 ### Simulated traffic (optional): [`generator/generator.py`](generator/generator.py)
-Enabled with `--profile simulator`. Each simulated session is a funnel: 1–5 page views, each with a 25 % chance of add-to-cart, and
+Enabled with `--profile simulator`. Orders go through the shop's checkout, so simulated sales consume
+stock too. Each simulated session is a funnel: 1–5 page views, each with a 25 % chance of add-to-cart, and
 each cart with a 40 % chance of becoming an order. Messages are **keyed by `user_id`**, so one user's
 events land in the same partition in order. Event times are backdated up to 3 s, so arrival order ≠
 event order. That's realistic, and it exercises the watermark. The Kafka producer runs with
@@ -196,7 +230,7 @@ event order. That's realistic, and it exercises the watermark. The Kafka produce
 - **Windows** use the window TVF `TUMBLE(TABLE ..., DESCRIPTOR(event_time), INTERVAL '1' MINUTE)`.
   Output is *append-only* (a window emits once when the watermark passes its end), which suits
   Iceberg's append commits.
-- **`EXECUTE STATEMENT SET`** submits all four `INSERT`s as a single job, so sources are shared.
+- **`EXECUTE STATEMENT SET`** submits all five `INSERT`s as a single job, so sources are shared.
 - **Offsets:** `scan.startup.mode = group-offsets` with `auto.offset.reset = earliest`. A resubmitted
   job resumes where the last checkpoint committed.
 - **Idempotent deploy:** the one-shot `flink-job` container checks the Flink REST API and refuses to
@@ -229,6 +263,8 @@ statistics let Trino skip files outside the window.
 | Checkpoint interval (= lake freshness) | `pipeline.sql` → `execution.checkpointing.interval` | `10 s` |
 | Allowed lateness | `pipeline.sql` → `WATERMARK … - INTERVAL '5' SECOND` | `5 s` |
 | Flink parallelism and slots | `docker-compose.yml` → `FLINK_PROPERTIES` | `2` / `4` |
+| Length of one inventory "day" | `DEMO_DAY_SECONDS` env var (dashboard) | `60` |
+| Default lead time per category | `LEAD_TIME_DAYS` in `shop/main.py` (per product in the admin) | 2–5 days |
 
 ```bash
 SESSIONS_PER_SEC=100 docker compose --profile simulator up -d generator   # 5x the simulated traffic
@@ -261,22 +297,25 @@ ALTER TABLE orders EXECUTE optimize;
 
 ```
 .
-├── docker-compose.yml          # the whole platform: 10 services + 3 one-shot init jobs (+ optional simulator)
+├── docker-compose.yml          # the whole platform: 10 services + 3 one-shot init jobs (+ optional simulator, toolbox)
+├── Dockerfile                  # toolbox image: run the tests and the demo with only Docker installed
 ├── flink/
 │   ├── Dockerfile              # Flink 1.20 + Kafka connector + Iceberg runtime + AWS bundle + Hadoop
 │   └── sql/pipeline.sql        # ★ the streaming pipeline (sources, catalog, tables, inserts)
+├── iceberg-rest/Dockerfile     # Iceberg REST catalog + the Postgres JDBC driver
 ├── trino/
 │   ├── catalog/lakehouse.properties   # Trino → Iceberg REST catalog + S3
 │   └── jvm.config              # fixed 1 GB heap (prevents OOM-kill in a 1.5 GB container)
 ├── shop/
-│   ├── main.py                 # API: catalog store (SQLite), click events, fake checkout -> Kafka
+│   ├── main.py                 # API: catalog + stock (SQLite), click events, fake checkout -> Kafka
 │   └── static/                 # bento UIs, no build step: store (index.html, app.js),
 │                               #   catalog admin (admin.html, admin.js), common.js, styles.css
 ├── catalog/products.json       # 48 seed products, shared by shop and simulator
 ├── generator/
 │   └── generator.py            # optional traffic simulator (--profile simulator)
 ├── dashboard/
-│   └── app.py                  # Streamlit app
+│   ├── app.py                  # Streamlit app
+│   └── inventory.py            # demand forecast + reorder math (pure functions) and its SQL
 ├── tests/                      # pytest suite: unit, contract, API, dashboard, browser e2e, integration
 ├── scripts/demo.py             # send shopper traffic through the store + capture screenshots
 ├── docs/                       # DEMO.md walkthrough, screenshots/, ai/ (PRD, Architecture, Rules, Design, Phases, Memory)
@@ -289,6 +328,15 @@ ALTER TABLE orders EXECUTE optimize;
 
 ## Testing
 
+With only Docker (the stack running), the toolbox image runs everything, including the browser and
+live integration tests:
+
+```bash
+docker compose run --rm tests
+```
+
+Or locally:
+
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements-dev.txt     # Linux/macOS: .venv/bin/python
@@ -300,15 +348,18 @@ python -m venv .venv
 | `test_catalog.py` | Catalog integrity; categories stay in sync across catalog, dashboard colors and store UI |
 | `test_contract.py` | Shop and simulator events have exactly the columns Flink reads in `pipeline.sql` |
 | `test_shop_api.py` | Every endpoint and payment method (card / UPI / COD), validation, price tampering, no card-data leaks |
-| `test_catalog_api.py` | Adding, validating, persisting and deleting products; a new product can be bought |
+| `test_catalog_api.py` | Adding, validating, persisting and deleting products; a new product can be bought; ids are never reused |
+| `test_inventory_api.py` | Stock: checkout takes it, short stock is refused (409, no events), restock and settings, the ledger, migration of older databases, and a 25-thread race that must not oversell |
+| `test_inventory_plan.py` | Forecast and reorder math: thresholds, trend, safety stock, sold-out products, SQL-injection guard |
 | `test_generator.py` | Simulator funnel logic |
-| `test_dashboard.py` | Dashboard run headless (Streamlit `AppTest`) against a fake Trino: KPIs, themes, SQL guard |
-| `test_storefront_e2e.py` | A real browser (Playwright + Edge) shops: search, cart, every checkout, server-down handling, layout |
-| `test_integration.py` | With `docker compose up`: a real order flows through Kafka → Flink → Iceberg and is queryable in Trino |
+| `test_dashboard.py` | Dashboard run headless (Streamlit `AppTest`) against a fake Trino: KPIs, themes, SQL guard, inventory tab and its Restock button |
+| `test_storefront_e2e.py` | A real browser (Playwright + Edge) shops: search, cart, every checkout, stock limits and sold-out, server-down handling, layout |
+| `test_integration.py` | With `docker compose up`: a real order flows through Kafka → Flink → Iceberg and is queryable in Trino; lakehouse stock matches the shop |
 
 The integration tests skip when the stack isn't running. Start it first to verify the full pipeline.
 Browser tests use the installed Edge; set `E2E_BROWSER=chromium` after `playwright install chromium`
-to use Playwright's own Chromium instead.
+to use Playwright's own Chromium instead (the toolbox does). After changing code, rebuild the toolbox
+with `docker compose build tests`.
 
 ## Design decisions and trade-offs
 
@@ -318,6 +369,7 @@ These are deliberate simplifications for a laptop demo, each with its production
 |---|---|---|
 | Flink checkpoints kept in JobManager memory | No shared filesystem needed between containers | S3 checkpoint storage + HA JobManager (Kubernetes operator) |
 | Iceberg REST fixture (a test server) on Postgres | Standard REST API, small footprint | Polaris / Lakekeeper / Nessie / Glue |
+| Inventory events published after the DB commit | Simple; a startup snapshot re-syncs the lake | Transactional outbox (or CDC from the shop database) |
 | Single Kafka broker, RF=1 | Memory | 3+ brokers, RF=3, `min.insync.replicas=2` |
 | Manual compaction button | Makes the small-files problem visible | Scheduled `rewrite_data_files` + `expire_snapshots` + `remove_orphan_files` |
 | JSON on Kafka | Human-readable in Kafka UI | Avro / Protobuf + Schema Registry |
@@ -335,6 +387,8 @@ These are deliberate simplifications for a laptop demo, each with its production
 | Trino exits with code 137 | OOM-kill. Keep `trino/jvm.config` (fixed heap) and `mem_limit` together |
 | Changed `pipeline.sql` but nothing happens | The running job is kept. Cancel it in the Flink UI, then `docker compose run --rm flink-job` |
 | Dashboard slowing down after an hour or two | Small files accumulate; press **🧹 Compact now** in the Internals tab |
+| Checkout says "Only N left" or "sold out" | Real: the stock ran out. Restock with 📦 in the admin, or from the dashboard's Inventory tab |
+| Restocked, but the Inventory tab still shows the old stock | Normal for ~10 s (shop → Kafka → Flink → Iceberg). If it never updates, check the Flink job |
 
 ## Roadmap ideas
 - [ ] Schema Registry + Avro, with a schema-evolution demo (`ALTER TABLE … ADD COLUMN` mid-stream)
@@ -343,10 +397,11 @@ These are deliberate simplifications for a laptop demo, each with its production
 - [ ] Scheduled table maintenance (Airflow DAG)
 - [ ] Data-quality checks (Great Expectations / Soda) on the gold tables
 - [ ] Kubernetes deployment with the Flink operator
+- [ ] Stock in transit: restocks arrive after their lead time; a transactional outbox for inventory events
 
 ## Tech stack
 
-`FastAPI` · `Apache Kafka 3.9` · `Apache Flink 1.20` · `Apache Iceberg 1.8.1` · `Trino 470` · `RustFS 1.0` · `Python 3.12` · `Streamlit 1.41` · `Docker Compose`
+`FastAPI` · `SQLite` · `Apache Kafka 3.9` · `Apache Flink 1.20` · `Apache Iceberg 1.8.1` · `PostgreSQL 16` · `Trino 470` · `RustFS 1.0` · `Python 3.12` · `Streamlit 1.41` · `Playwright` · `Docker Compose`
 
 ## License
 

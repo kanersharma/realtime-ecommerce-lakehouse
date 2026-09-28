@@ -1,0 +1,8 @@
+# Keep the toolbox build context small and free of local state.
+.git
+.venv
+.pytest_cache
+**/__pycache__
+**/*.pyc
+shop/data
+docs/screenshots

@@ -1,5 +1,9 @@
 """Dashboard, run headless with streamlit.testing.v1.AppTest against a fake Trino."""
+import io
+import json
 import random
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 
 import pytest
@@ -16,8 +20,17 @@ CATS = ["Beauty", "Books", "Electronics", "Fashion", "Home", "Sports"]
 class FakeTrino:
     """Answers each dashboard query with plausible rows; records every SQL string it receives."""
 
-    def __init__(self, fail=False):
+    # product_id, name, category, on_hand, unit_price, lead, cover, history_days, level, trend, sigma, avg/day, sold_7d
+    INVENTORY = [
+        ("P002", "4K Monitor", "Electronics", 0, 329.0, 5, 7, 10, 0.5, 0.0, 0.5, 3.0, 21.0),   # out of stock
+        ("P001", "Wireless Earbuds", "Electronics", 12, 59.99, 5, 7, 10, 4.0, 0.0, 0.0, 4.0, 28.0),  # reorder now
+        ("P015", "Data Engineering Book", "Books", 60, 42.0, 2, 7, 10, 2.0, 0.0, 0.0, 2.0, 14.0),   # OK
+        ("P049", "Game Controller", "Electronics", 50, 9.99, 5, 7, 0, 0.0, 0.0, 0.0, 0.0, 0.0),     # no demand
+    ]
+
+    def __init__(self, fail=False, inventory=None):
         self.fail, self.queries = fail, []
+        self.inventory = self.INVENTORY if inventory is None else inventory
 
     def cursor(self):
         return self
@@ -26,16 +39,21 @@ class FakeTrino:
         self.queries.append(sql)
         if self.fail:
             raise RuntimeError("Table 'lakehouse.shop.orders' does not exist")
-        cols, self.rows = self.data(sql)
+        cols, self.rows = self.data(sql, self.inventory)
         self.description = [(c,) for c in cols]
 
     def fetchall(self):
         return self.rows
 
     @staticmethod
-    def data(sql):
+    def data(sql, inventory):
         now = datetime(2026, 9, 28, 12, 0)
         rng = random.Random(0)
+        if "inventory_movements" in sql and "regr_slope" in sql:
+            return ["product_id", "product_name", "category", "on_hand", "unit_price", "lead_time_days",
+                    "target_cover_days", "history_days", "level", "trend", "sigma", "avg_per_day", "sold_7d"], inventory
+        if "sum(quantity) AS units" in sql and "product_id = 'P" in sql:
+            return ["age", "units"], [(age, age % 4) for age in range(14, 0, -1)]
         if "count_if(event_time >" in sql:
             return ["orders_now", "orders_prev", "revenue_now", "revenue_prev", "freshness_s"], [(1843, 1702, 162384.5, 150120.0, 14)]
         if "WITH c AS" in sql:
@@ -62,8 +80,8 @@ class FakeTrino:
 
 @pytest.fixture
 def fake(monkeypatch):
-    def make(fail=False):
-        conn = FakeTrino(fail)
+    def make(fail=False, inventory=None):
+        conn = FakeTrino(fail, inventory)
         monkeypatch.setattr(trino.dbapi, "connect", lambda **kw: conn)
         st.cache_resource.clear()  # conn() is cached across runs
         return conn
@@ -86,7 +104,7 @@ def test_live_tab_renders_kpis(fake):
     assert metrics["Orders · last 5 min"] == "1,843"
     assert metrics["Conversion · 15 min"] == "29.6%"
     assert metrics["Data freshness"] == "14 s"
-    assert len(at.tabs) == 3
+    assert len(at.tabs) == 4
 
 
 def test_open_minutes_are_marked_provisional(fake):
@@ -162,3 +180,93 @@ def test_sql_playground_is_read_only(fake, sql, ok):
     ran = any(q.strip() == sql.strip().rstrip(";") for q in conn.queries) if sql.strip() else False
     assert ran == ok
     assert (len(at.error) == 0) == ok
+
+
+# ------------------------------------------------ 📦 Inventory tab
+def test_inventory_tab_kpis_and_plan(fake):
+    fake()
+    at = run()
+    assert not at.exception
+    m = {x.label: x.value for x in at.metric}
+    assert (m["Reorder now"], m["Out of stock"]) == ("2", "1")       # out of stock + at/below reorder point
+    assert m["Stock value"] == "$3,739"                                # 12×59.99 + 60×42 + 50×9.99
+    assert m["Units sold · 7 days"] == "63" and m["1 demo day"] == "60 s"
+    # suggestions, most urgent first: the sold-out monitor, then the earbuds
+    assert at.button(key="restock_P002").label == "Restock 38"          # ceil(3×12 + 1.65×0.5×√5) − 0
+    assert at.button(key="restock_P001").label == "Restock 36"          # 4×12 − 12
+    assert not any(b.key == "restock_P015" for b in at.button)         # OK: nothing to order
+
+
+def shop_api(monkeypatch):
+    """Replace the shop's restock endpoint; returns the list of calls it receives."""
+    calls = []
+
+    def urlopen(req, timeout):
+        calls.append((req.full_url, req.get_method(), json.loads(req.data)))
+        return io.BytesIO(json.dumps({"name": "4K Monitor", "on_hand": 38}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    return calls
+
+
+def test_restock_button_calls_the_shop(fake, monkeypatch):
+    monkeypatch.setenv("SHOP_URL", "http://shop.test:8000")  # the toolbox sets its own SHOP_URL
+    fake()
+    calls = shop_api(monkeypatch)
+    at = run()
+    at.button(key="restock_P002").click().run()
+    assert not at.exception
+    assert calls == [("http://shop.test:8000/api/products/P002/restock", "POST", {"quantity": 38})]
+    assert any("Restocked 4K Monitor: 38 on hand" in x.value for x in at.success)
+
+
+def test_restock_all_orders_every_suggestion(fake, monkeypatch):
+    fake()
+    calls = shop_api(monkeypatch)
+    at = run()
+    at.button(key="restock_all").click().run()
+    assert not at.exception
+    assert [(url.rsplit("/", 2)[-2], body) for url, _, body in calls] == [
+        ("P002", {"quantity": 38}), ("P001", {"quantity": 36})]
+    assert any("Restocked 2 products" in x.value for x in at.success)
+
+
+@pytest.mark.parametrize("button", ["restock_P002", "restock_all"])
+def test_restock_says_so_when_the_shop_is_down(fake, monkeypatch, button):
+    def down(req, timeout):
+        raise urllib.error.URLError("Connection refused")
+
+    fake()
+    monkeypatch.setattr(urllib.request, "urlopen", down)
+    at = run()
+    at.button(key=button).click().run()
+    assert not at.exception
+    assert any("Restock failed" in e.value for e in at.error)
+
+
+def test_inventory_tab_waits_for_stock_data(fake):
+    fake(inventory=[])
+    at = run()
+    assert not at.exception
+    assert any("No stock data yet" in i.value for i in at.info)
+
+
+def test_inventory_demand_chart_query_uses_the_selected_product(fake):
+    conn = fake()
+    at = run()
+    assert any("product_id = 'P002'" in q for q in conn.queries)       # default: the most urgent product
+    at.selectbox(key="inv_product").set_value("Data Engineering Book").run()
+    assert any("product_id = 'P015'" in q for q in conn.queries)
+
+
+def test_picked_product_survives_a_refresh_that_reorders_products(fake):
+    """Auto-refresh re-sorts products by urgency. Streamlit resets a select whose options change,
+    so the options must not follow that order, or the pick jumps back to the first product."""
+    conn = fake()
+    at = run()
+    at.selectbox(key="inv_product").set_value("Wireless Earbuds").run()
+    conn.inventory = [(*r[:3], 0, *r[4:]) if r[0] == "P015" else r for r in conn.inventory]  # book sells out
+    at.run()
+    assert not at.exception
+    assert at.selectbox(key="inv_product").value == "Wireless Earbuds"
+

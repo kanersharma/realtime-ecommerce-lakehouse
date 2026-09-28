@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path[:0] = [str(ROOT / "shop"), str(ROOT / "generator")]
+sys.path[:0] = [str(ROOT / "shop"), str(ROOT / "generator"), str(ROOT / "dashboard")]
 
 import main as shop  # noqa: E402  (shop/main.py)
 
@@ -17,6 +17,16 @@ def source_columns(table):
     body = re.search(rf"CREATE TEMPORARY TABLE {table} \((.*?)\) WITH", sql, re.S).group(1)
     return {line.split()[0] for line in body.strip().splitlines()
             if line.strip() and not line.strip().startswith(("WATERMARK", "--"))}
+
+
+@pytest.fixture(autouse=True, scope="session")
+def developer_db_untouched():
+    """Guard for Rules R-CAT-6: the test run must not create or modify shop/data/shop.db."""
+    dev = ROOT / "shop" / "data" / "shop.db"
+    before = dev.stat().st_mtime if dev.exists() else None
+    yield
+    after = dev.stat().st_mtime if dev.exists() else None
+    assert after == before, "tests wrote to the developer database shop/data/shop.db"
 
 
 @pytest.fixture(autouse=True)

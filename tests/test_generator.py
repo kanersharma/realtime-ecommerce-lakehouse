@@ -65,3 +65,29 @@ def test_simulator_uses_the_shared_catalog():
     from conftest import ROOT
     catalog = json.loads((ROOT / "catalog" / "products.json").read_text(encoding="utf-8"))
     assert [p[0] for p in generator.PRODUCTS] == [p["id"] for p in catalog]
+
+
+def test_simulated_orders_become_valid_shop_checkouts(sessions):
+    """Orders go through the shop (it owns stock), so each session's orders must be a valid checkout."""
+    import main as shop
+    bodies = 0
+    for s in sessions:
+        orders = [e for topic, _, e in s if topic == "orders"]
+        if not orders:
+            continue
+        body = generator.checkout_request(orders)
+        c = shop.Checkout(**body)                                   # raises if the shop would reject it
+        assert shop.authorize(c.payment) is None                     # only test credentials
+        assert [(i.product_id, i.quantity) for i in c.items] == [(o["product_id"], o["quantity"]) for o in orders]
+        bodies += 1
+    assert bodies > 100
+
+
+def test_simulator_only_uses_payment_methods_the_shop_accepts(sessions):
+    methods = {e["payment_method"] for s in sessions for t, _, e in s if t == "orders"}
+    assert methods == {"card", "upi", "cod"}
+
+
+def test_place_order_survives_a_missing_shop():
+    assert generator.place_order("http://127.0.0.1:9", {"items": []}) == 0
+

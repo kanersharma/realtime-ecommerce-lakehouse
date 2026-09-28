@@ -11,11 +11,52 @@
 - **Style:** neo-brutalism for both apps; bento grid for the store; dark mode on the dashboard.
 - **Real over mock:** events should come from real UI interactions; the simulator is optional.
 - **Docs for agents:** keep `CLAUDE.md` and `docs/ai/*` current when behaviour changes.
+- **Docs describe the project only:** no personal background or motivation for building it.
 - **Environment:** Windows 10, Docker Desktop with ~6 GB of RAM, local Python 3.9 (containers use
   3.12), Microsoft Edge available for Playwright, GitHub account `kanersharma`. The owner also runs an
   unrelated Airflow stack on port 8080; don't run it alongside this one on 6 GB.
 
 ## 2. Decision and incident log (newest first)
+
+### 2026-09-28 · Inventory and demand forecasting (Phase 9); Docker toolbox
+- **Owner decisions:** orders beyond stock are **rejected** (no back-orders), the forecast is **EWMA +
+  linear trend**, and the Docker work is a **toolbox image** for tests and the demo.
+- **Why the shop owns stock:** a checkout needs a synchronous, transactional yes/no. The lakehouse is
+  ~10 s behind and can't give one. `BEGIN IMMEDIATE` serializes checkouts (R-INV-2); the lakehouse
+  gets every movement as an event for analytics (R-INV-1, R-INV-4).
+- **Product ids were reused after deletes.** Tests that created and deleted products on the live stack
+  freed `P050`, and the next product took it, inheriting the deleted one's sales and stock history in
+  Iceberg. **Now:** the next id is past the highest id ever seen, including `stock_movements` (R-CAT-4).
+- **A sold-out product got no reorder suggestion** while the KPI said "Reorder now". Nobody can buy a
+  sold-out product, so its recent days are zeros, the EWMA drops to 0, and so does the suggestion
+  (censored demand). **Now:** at least the plain average, and at least `MIN_SOLD_OUT_DEMAND` (R-INV-6).
+- **The e2e tests wrote to the developer database:** the shop's startup stock snapshot ran against
+  `shop/data/shop.db`. **Now:** the e2e server gets its own temp `SHOP_DB`, and a session guard
+  (`developer_db_untouched` in `conftest.py`) fails the run if the developer database changes (R-CAT-6).
+- **The store was blank over plain http on any host but localhost** (the toolbox opens
+  `http://shop:8000`, and so does a LAN IP): `crypto.randomUUID` exists only in secure contexts. **Now:**
+  `crypto.getRandomValues`, and an e2e test opens the store under another hostname.
+- **The toolbox base is pinned to bookworm:** `python:3.12-slim` moved to Debian 13, where Playwright
+  1.49's `install --with-deps` fails (it asks for `ttf-unifont`) (R-OPS-7).
+- **A dashboard test passed locally but failed in the toolbox:** it hardcoded `localhost:8000`, while
+  the toolbox sets `SHOP_URL=http://shop:8000`. **Now:** the test sets `SHOP_URL` itself. Tests must not
+  depend on the machine's environment.
+- **After hours of demo traffic, Trino sat at its 1.5 GiB limit** with hundreds of small files per
+  table: queries stalled (one integration test took 240 s, another run failed with "failed after 3
+  attempts"). `OPTIMIZE` on every table brought it to 48 s. Before a long test or demo session on an
+  old stack, compact (Internals tab) or restart Trino.
+- **A `pytest.skip` inside a test's `if`** hid whether the interesting path ran at all. The test now
+  builds its own data so the path always runs.
+- **The screenshot review caught five more:** the add dialog numbered its sections 1, 2, 4, 3; the
+  forecast chart's axis labels ran together (`labelSeparation`); `store-products` / `store-search`
+  had never scrolled to the grid (since Phase 6: `scroll_into_view_if_needed` does nothing when the
+  heading is already on screen); and the forecast's product picker jumped back to the first product
+  within a minute. Streamlit resets a select whose options change, and the options were in urgency
+  order, which shifts every demo day. **Now:** alphabetical options, with the default seeded to the
+  most urgent product through `st.session_state`, plus a regression test. Finally, the Inventory tab
+  looked faded ~40 % of the time: Streamlit fades elements while a fragment re-runs, and with a 10 s
+  auto-refresh and 4–5 s queries that is a large part of every cycle. **Now:** a CSS rule keeps stale
+  elements opaque (the header's RUNNING indicator still shows activity).
 
 ### 2026-09-28 · "I can't see revenue per minute": two root causes
 - **1. The Flink job had crash-looped for 15+ minutes** (115 restarts). Every Iceberg commit failed with
@@ -122,7 +163,10 @@
 
 ## 3. Useful facts
 - End-to-end latency is ~7–15 s. Gold windows appear ~65 s after a minute starts.
-- Stack memory is ~4.5–5 GB. Test suite: 91 tests, ~2.5 min with e2e and integration.
+- Stack memory is ~4.5–5 GB. Test suite: 217 tests, ~7 min locally, ~4.5 min in the toolbox.
 - Test cards: `4242 4242 4242 4242` approves; `4000 0000 0000 0002` and `4000 0000 0000 9995` decline.
 - The shop without Docker: `cd shop && uvicorn main:app --port 8000` prints events (dry run).
-- Recreate screenshots: `.venv/Scripts/python scripts/demo.py` (~6 min, needs the stack).
+- Recreate screenshots: `docker compose run --rm demo` (or `.venv/Scripts/python scripts/demo.py`);
+  ~7 min, needs the stack. Rebuild the toolbox first (`docker compose build tests`) if code changed.
+- Inventory: 1 demo day = 60 s (`DEMO_DAY_SECONDS`), so 14 days of history is 14 minutes of traffic.
+  Seed products start with 15–74 units; admin-added ones with 50.

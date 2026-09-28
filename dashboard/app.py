@@ -2,18 +2,27 @@
 
 Tabs:
   Live Business       - KPIs, revenue per minute, funnel, top products (auto-refresh)
+  Inventory           - stock, demand forecast (EWMA + trend), days of cover, reorder suggestions
   Lakehouse Internals - Iceberg snapshots, small files, compaction, time travel
   SQL Playground      - read-only ad-hoc Trino SQL
 """
+import json
 import os
 import time
+import urllib.request
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 import trino
 
-TABLES = ["orders", "clicks", "revenue_per_minute", "funnel_per_minute"]
+import inventory as inv  # pure forecasting / reorder math (dashboard/inventory.py, unit-tested)
+
+TABLES = ["orders", "clicks", "inventory_movements", "revenue_per_minute", "funnel_per_minute"]
+SHOP_URL = os.getenv("SHOP_URL", "http://localhost:8000")  # restock goes to the shop, the system of record
+# Stock status colors: reserved for status (never a category), always shown with the status text.
+STATUS_COLORS = {"Out of stock": "#C62828", "Reorder now": "#F2A900", "Reorder soon": "#FFE08A",
+                 "OK": "#7CE0C3", "No demand": "#C9C9C9"}
 READ_ONLY = ("select", "with", "show", "describe", "explain")
 LINKS = {
     "🛒 Lakeshop (make real events)": "http://localhost:8000",
@@ -66,6 +75,9 @@ html, body, p, li, label, input, textarea, button, [data-testid="stMarkdownConta
 h1, h2, h3 {{ font-family: 'Archivo Black', sans-serif !important; letter-spacing: -0.02em; }}
 code, pre {{ font-family: 'JetBrains Mono', monospace !important; }}
 .block-container {{ padding-top: 3.5rem; }}
+/* Streamlit fades elements while a fragment re-runs; with 10 s auto-refresh and multi-second queries the
+   page would be faded half the time. Keep it readable: the header's RUNNING indicator shows activity. */
+[data-stale="true"] {{ opacity: 1 !important; transition: none !important; }}
 
 /* page colors (flip with the theme) */
 .stApp, [data-testid="stHeader"] {{ background: var(--paper); }}
@@ -323,7 +335,8 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-live_tab, internals_tab, sql_tab = st.tabs(["📈 Live Business", "🔬 Lakehouse Internals", "🧪 SQL Playground"])
+live_tab, inventory_tab, internals_tab, sql_tab = st.tabs(
+    ["📈 Live Business", "📦 Inventory", "🔬 Lakehouse Internals", "🧪 SQL Playground"])
 
 
 # ---------------------------------------------------------------- live tab
@@ -412,6 +425,157 @@ def live():
 
 with live_tab:
     live()
+
+
+# ---------------------------------------------------------------- inventory tab
+INVENTORY_SQL = inv.inventory_sql()
+
+
+def restock_via_shop(product_id, quantity):
+    """POST to the shop (it owns stock); the new stock reaches this page via Kafka → Flink → Iceberg."""
+    req = urllib.request.Request(
+        f"{SHOP_URL}/api/products/{product_id}/restock", data=json.dumps({"quantity": int(quantity)}).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.load(r)
+
+
+def cover_text(r):
+    if r.on_hand <= 0:
+        return "sold out"
+    return "no demand yet" if pd.isna(r.days_of_cover) else f"{r.days_of_cover:.1f} days of cover"
+
+
+@st.fragment(run_every=refresh or None)
+def inventory_view():
+    try:
+        stock, ms = query(INVENTORY_SQL)
+    except Exception as err:  # table not created yet / Trino still starting
+        waiting(err)
+        return
+    if stock.empty:
+        st.info("⏳ **No stock data yet.** The shop publishes a stock snapshot when it starts, and every "
+                "order and restock after that. It reaches this page within about 10 s.")
+        return
+
+    plans = pd.DataFrame([inv.plan(r.on_hand, r.level, r.trend, r.sigma, r.avg_per_day, r.history_days,
+                                   r.lead_time_days, r.target_cover_days) for r in stock.itertuples()])
+    df = pd.concat([stock, plans], axis=1)
+    df["trend_arrow"] = [inv.trend_arrow(t, l) for t, l in zip(df.trend, df.level)]
+    df["priority"] = df.status.map(inv.STATUSES.index)
+    df = df.sort_values(["priority", "days_of_cover"], na_position="last").reset_index(drop=True)
+
+    needs = int(df.status.isin(["Out of stock", "Reorder now"]).sum())
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Reorder now", needs, help="Out of stock, or at/below the reorder point")
+    c2.metric("Out of stock", int((df.on_hand <= 0).sum()))
+    c3.metric("Stock value", f"${(df.on_hand * df.unit_price).sum():,.0f}")
+    c4.metric("Units sold · 7 days", f"{int(df.sold_7d.sum()):,}")
+    c5.metric("1 demo day", f"{inv.DAY_SECONDS} s", help="Days run fast so a live demo shows demand, "
+              "lead times and reorders within minutes (DEMO_DAY_SECONDS).")
+
+    st.write("")
+    with card("Reorder suggestions", "FORECAST · EWMA + TREND"):
+        todo = df[df.suggested_qty > 0].head(6)
+        if todo.empty:
+            st.caption("Nothing to reorder right now: every product with demand is above its reorder point.")
+        else:
+            cols = st.columns(3)
+            for i, r in enumerate(todo.itertuples()):
+                with cols[i % 3]:
+                    st.markdown(f"**{r.product_name}**  \n{r.status} · {r.on_hand} on hand · {cover_text(r)}  \n"
+                                f"forecast {r.forecast_per_day:.1f}/day · lead time {r.lead_time_days} d")
+                    if st.button(f"Restock {r.suggested_qty}", key=f"restock_{r.product_id}", type="primary"):
+                        try:
+                            p = restock_via_shop(r.product_id, r.suggested_qty)
+                            st.success(f"Restocked {p['name']}: {p['on_hand']} on hand. This page catches up "
+                                       "in about 10 s (shop → Kafka → Flink → Iceberg).")
+                        except Exception as err:
+                            st.error(f"Restock failed: {err}")
+            if len(df[df.suggested_qty > 0]) > 1 and st.button(
+                    f"Restock all {int((df.suggested_qty > 0).sum())} suggestions", key="restock_all"):
+                try:
+                    for r in df[df.suggested_qty > 0].itertuples():
+                        restock_via_shop(r.product_id, r.suggested_qty)
+                    st.success(f"Restocked {int((df.suggested_qty > 0).sum())} products. This page catches up "
+                               "in about 10 s.")
+                except Exception as err:
+                    st.error(f"Restock failed: {err}")
+        st.caption(f"Suggested quantity = forecast × (lead time + target cover) + safety stock − on hand. "
+                   f"Safety stock = {inv.Z} × σ(daily demand) × √lead time (about a 95 % service level).")
+
+    st.write("")
+    left, right = st.columns([3, 2], gap="large")
+    with left, card("Days of cover", "MOST URGENT 15"):
+        urgent = df[(df.on_hand <= 0) | df.days_of_cover.notna()].head(15).copy()
+        if urgent.empty:
+            st.caption("No sales yet, so there's no demand to measure cover against. Shop a little, or run "
+                       "the demo traffic, and check back in a few demo days.")
+        else:
+            urgent["cover"] = urgent.days_of_cover.fillna(0).clip(upper=60)
+            urgent["label"] = [("sold out" if o <= 0 else f"{c:.1f} d") for o, c in zip(urgent.on_hand, urgent.cover)]
+            base = alt.Chart(urgent).encode(y=alt.Y("product_name:N", sort=None, title=None))
+            draw(base.mark_bar(stroke=M["ink"], strokeWidth=1.5, height=16).encode(
+                     x=alt.X("cover:Q", title="Days of cover (demo days)"),
+                     color=alt.Color("status:N", scale=alt.Scale(domain=list(STATUS_COLORS),
+                                                                 range=list(STATUS_COLORS.values()))),
+                     tooltip=["product_name", "status", "on_hand", alt.Tooltip("forecast_per_day:Q", format=".1f"),
+                              alt.Tooltip("cover:Q", format=".1f", title="days of cover"), "lead_time_days"])
+                 + base.mark_tick(color=M["ink"], thickness=3, size=22).encode(x="lead_time_days:Q")
+                 + base.mark_text(align="left", dx=6, fontWeight=700, color=M["ink"]).encode(
+                     x="cover:Q", text="label:N"),
+                 height=max(220, 26 * len(urgent)))
+            st.caption("The tick is the product's lead time: a bar shorter than its tick runs out "
+                       "before a refill ordered now could arrive. A longer bar can still say Reorder now "
+                       "when demand is lumpy: safety stock covers the swings, not just the average.")
+
+    with right, card("Demand & forecast", "DAILY"):
+        names = dict(zip(df.product_name, df.product_id))
+        # Streamlit resets a select whose options change, and df's urgency order changes with every
+        # refresh, so list names alphabetically and start on the most urgent product.
+        if st.session_state.get("inv_product") not in names:
+            st.session_state["inv_product"] = df.product_name.iloc[0]
+        pick = st.selectbox("Product", sorted(names), key="inv_product")
+        row = df[df.product_id == names[pick]].iloc[0]
+        sql = inv.daily_sales_sql(row.product_id)
+        hist, ms2 = query(sql)
+        horizon = int(row.lead_time_days + row.target_cover_days)
+        series = pd.concat([
+            pd.DataFrame({"day": [f"-{a}" for a in hist.age], "units": hist.units.astype(float), "kind": "sold"}),
+            pd.DataFrame({"day": [f"+{h}" for h in range(1, horizon + 1)], "units": row.forecast_per_day,
+                          "kind": "forecast"}),
+        ], ignore_index=True)
+        order = list(series.day)
+        x = alt.X("day:O", sort=order, title="demo days (today = 0)",
+                  axis=alt.Axis(labelOverlap="greedy", labelSeparation=6, labelAngle=0))
+        draw(alt.Chart(series[series.kind == "sold"]).mark_bar(fill=BLUE, stroke=M["ink"], strokeWidth=1.5).encode(
+                 x=x, y=alt.Y("units:Q", title="Units per day"), tooltip=["day", "units"])
+             + alt.Chart(series[series.kind == "forecast"]).mark_line(color=PINK, strokeWidth=3, strokeDash=[6, 4]).encode(
+                 x=x, y="units:Q", tooltip=["day", alt.Tooltip("units:Q", format=".2f", title="forecast/day")]),
+             height=260)
+        st.caption(f"{pick}: {row.on_hand} on hand · forecast {row.forecast_per_day:.2f}/day {row.trend_arrow} · "
+                   f"reorder point {row.reorder_point:.0f} · {row.status}")
+        show_sql(sql, ms2, len(hist))
+
+    st.write("")
+    with card("All products", "STOCK · FORECAST · REORDER"):
+        table = df[["status", "product_name", "category", "on_hand", "sold_7d", "forecast_per_day", "trend_arrow",
+                    "days_of_cover", "lead_time_days", "reorder_point", "suggested_qty"]]
+        st.dataframe(table, hide_index=True, use_container_width=True, column_config={
+            "status": "Status", "product_name": "Product", "category": "Category", "on_hand": "On hand",
+            "sold_7d": st.column_config.NumberColumn("Sold · 7 d", format="%d"),
+            "forecast_per_day": st.column_config.NumberColumn("Forecast / day", format="%.2f"),
+            "trend_arrow": "Trend",
+            "days_of_cover": st.column_config.NumberColumn("Days of cover", format="%.1f"),
+            "lead_time_days": st.column_config.NumberColumn("Lead time (d)", format="%d"),
+            "reorder_point": st.column_config.NumberColumn("Reorder point", format="%.0f"),
+            "suggested_qty": st.column_config.NumberColumn("Suggested qty", format="%d"),
+        })
+        show_sql(INVENTORY_SQL, ms, len(stock))
+
+
+with inventory_tab:
+    inventory_view()
 
 
 # ---------------------------------------------------------------- internals tab
@@ -514,6 +678,15 @@ LEFT JOIN orders o ON o.session_id = c.session_id AND o.product_id = c.product_i
 WHERE c.event_type = 'add_to_cart'
 GROUP BY 1
 ORDER BY abandonment_rate DESC""",
+    "Current stock (latest movement per product)": """SELECT product_id, product_name, on_hand_after AS on_hand, reason, event_time
+FROM (SELECT *, row_number() OVER (PARTITION BY product_id ORDER BY event_time DESC, seq DESC) AS rn
+      FROM inventory_movements)
+WHERE rn = 1 AND reason <> 'removed'
+ORDER BY on_hand""",
+    "Stock history of the 4K Monitor": """SELECT seq, reason, delta, on_hand_after, event_time
+FROM inventory_movements
+WHERE product_id = 'P002'
+ORDER BY seq DESC""",
     "Iceberg partitions": 'SELECT * FROM "orders$partitions"',
     "Table DDL": "SHOW CREATE TABLE orders",
 }

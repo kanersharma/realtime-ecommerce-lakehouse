@@ -77,7 +77,31 @@ tiles for friendliness.
   (from bronze) are 40 % opacity with dashed outlines, explained by a caption. Axis labels use
   `labelOverlap="greedy"` so they never collide.
 - **SQL disclosure**: `show_sql()` renders an expander "🔍 SQL · N ms · N rows" using `code()`.
+- **📦 Inventory tab**: five KPI tiles (Reorder now = out of stock + at/below the reorder point, Out of
+  stock, Stock value, Units sold · 7 days, 1 demo day), then:
+  - **Reorder suggestions** (tag `FORECAST · EWMA + TREND`): up to 6 products in a 3-column grid, each
+    with status, stock, cover, forecast and lead time in words, and a pink **Restock N** button; a
+    **Restock all N suggestions** button below; a caption with the formula.
+  - **Days of cover** (tag `MOST URGENT 15`): horizontal bars coloured by status, a direct label
+    ("sold out" or "N.N d"), and a thick ink tick at the product's lead time.
+  - **Demand & forecast** (tag `DAILY`): a product select (alphabetical, starting on the most urgent
+    product); blue bars for units sold per demo day, and a dashed pink line for the forecast over
+    lead time + target cover.
+  - **All products**: the full table (status, stock, 7-day sales, forecast, trend arrow ↗ → ↘, cover,
+    lead time, reorder point, suggested quantity).
+
+  Status colours are fixed, like category colours, and always come with the status word:
+
+  | Status | Colour |
+  |---|---|
+  | Out of stock | `#C62828` |
+  | Reorder now | `#F2A900` |
+  | Reorder soon | `#FFE08A` |
+  | OK | `#7CE0C3` |
+  | No demand | `#C9C9C9` |
 - **Dark mode**: sidebar toggle; the canvas data grid is inverted with `filter: invert(1) hue-rotate(180deg)`.
+- **Auto-refresh never fades content**: Streamlit's stale-element fade is switched off (`[data-stale]`
+  stays opaque), so a live page stays readable; the header's RUNNING indicator shows activity.
 
 ## 4. Store (bento grid)
 - **Grid**: 12 columns at desktop, 6 below 1000 px, 2 below 640 px; `grid-auto-flow: dense` fills gaps.
@@ -93,23 +117,34 @@ tiles for friendliness.
   on edit; the success screen links to the dashboard.
 - **Feedback**: an ink toast with a pink shadow for "Added …"; the live-events tile updates with the
   last event name.
+- **Stock states** (never colour alone): at or below 5 units a tile shows red **"Only N left"**; a
+  sold-out tile fades its art to grey, gets a rotated ink **SOLD OUT** stamp, and its button becomes a
+  disabled "Sold out". The product dialog shows "In stock" / "Only N left" / "Sold out" above the
+  stepper, and quantities clamp to the stock ("Only 3 left: added 3"). The cart warns per line, and a
+  refused checkout shows the server's 409 message in the pink error box.
 - **Copy tone**: short, friendly and a little cheeky ("Pay when it (doesn't) arrive. It's a demo.").
 
 ## 5. Catalog admin (`/admin.html`)
 - The same topbar as the store, plus an ink **CATALOG** pill, a search box, "← Store" and a pink
   **"+ Add product"** button. The store's topbar links here with a **🗂️ Catalog** button.
-- **Stats bento:** products (yellow; "N seed · N added by you"), average price with range (mint), and
-  newest product (periwinkle), above the same 7 category buttons as the store (filters).
+- **Stats bento:** products (yellow; "N seed · N added by you"), average price with range (mint), stock
+  (peach; units on hand, "N sold out · N low") and newest product (periwinkle), above the same 7
+  category buttons as the store (filters).
 - **Product table** inside one tile (horizontal scroll inside the tile on narrow screens, never on the
   page): emoji thumb on the category tint, mono id, name with a one-line description, category chip
-  with the category colour as a thick bottom border, price, badge, rating ("No reviews yet" for new),
-  Source ("Seed" or a yellow "Added" chip), and actions (**View** deep-links to `/?q=name`; 🗑️ only
+  with the category colour as a thick bottom border, price, stock (a red **SOLD OUT** chip, an amber
+  **"N · low"** chip, or the number), badge, rating ("No reviews yet" for new), Source ("Seed" or a
+  yellow "Added" chip), and actions (**View** deep-links to `/?q=name`; **📦** on every row; 🗑️ only
   on added products). A newly added row flashes yellow. Added products also get a **⭐** action that
   opens a small reviews dialog (manual values, 🎲 Random, No reviews, with a live star preview).
+- **Stock dialog (📦):** the product, a big **units on hand** number, a "Restock" fieldset (add units,
+  with +10 / +50 / +100 shortcuts) and "Reorder settings" (lead time and target cover in days, with a
+  one-line explanation). One Save applies both.
 - **Add dialog:** two columns (they stack below 1000 px). The form has fieldsets "1 · Details" (name,
   category, price, badge, description with a live counter) and "2 · Photo" (an emoji grid as a
-  radiogroup; the selected emoji turns yellow with a shadow; the choices follow the category) and
-  "3 · Reviews" (optional rating and count, **🎲 Random reviews** for realistic values, **No reviews**). The
+  radiogroup; the selected emoji turns yellow with a shadow; the choices follow the category),
+  "3 · Inventory" (starting stock 50; the lead-time placeholder shows the category default; target
+  cover 7) and "4 · Reviews" (optional rating and count, **🎲 Random reviews** for realistic values, **No reviews**). The
   **live preview** is a real store tile, so what you see is what the store shows. Errors appear in the
   pink box and clear as soon as you edit.
 
@@ -122,6 +157,7 @@ tiles for friendliness.
 - The layout has no horizontal scroll at 375, 768 or 1440 px (tested).
 
 ## 7. Screenshots
-`scripts/demo.py` captures 13 images into `docs/screenshots/` (store at 1440×900 plus mobile at 390 px
-@2x; dashboard at 1440×1500 in light, dark, internals and SQL). Review every image before committing,
+`docker compose run --rm demo` (or `scripts/demo.py` locally) captures 17 images into `docs/screenshots/`:
+store and admin at 1440×900 plus mobile at 390 px @2x; dashboard at 1440×1500 in light, dark,
+inventory, internals and SQL. Review every image before committing,
 because screenshots on real data have exposed real bugs (see Memory.md).

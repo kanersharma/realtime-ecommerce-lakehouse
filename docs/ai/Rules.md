@@ -6,12 +6,13 @@
 
 ## R-TEST: Testing (the owner's standing rule)
 - **R-TEST-1** MUST run the **whole** suite before any change is considered done (commit, push, or
-  saying "done"): `.venv/Scripts/python -m pytest -rs`.
+  saying "done"): `.venv/Scripts/python -m pytest -rs`, or `docker compose run --rm tests` with only
+  Docker installed (the toolbox image; rebuild it with `docker compose build tests` after code changes).
 - **R-TEST-2** MUST add or update tests in the same change. A bug fix MUST include a test that fails
   without the fix.
 - **R-TEST-3** MUST prove each new test can fail: break the code on purpose, see it go red, restore.
-- **R-TEST-4** For changes touching the shop, events, pipeline, catalog, Trino config, dashboard SQL
-  or docker-compose, integration tests MUST **run, not skip**: `docker compose up -d --build`, wait
+- **R-TEST-4** For changes touching the shop, events, pipeline, catalog, inventory, Trino config,
+  dashboard SQL or docker-compose, integration tests MUST **run, not skip**: `docker compose up -d --build`, wait
   for the Flink job to be RUNNING, then run pytest again.
 - **R-TEST-5** UI changes MUST be looked at in a real browser: store and dashboard, light and dark,
   desktop and ~375 px mobile.
@@ -19,13 +20,14 @@
 - **R-TEST-7** Report honestly: pass/fail/skip counts, and anything not verified.
 
 ## R-EVT: Event contract
-- **R-EVT-1** Producers MUST emit exactly the columns of `clicks_src` / `orders_src` in
+- **R-EVT-1** Producers MUST emit exactly the columns of `clicks_src` / `orders_src` / `inventory_src` in
   `flink/sql/pipeline.sql` (enforced by `tests/test_contract.py`).
 - **R-EVT-2** Adding or renaming a field MUST change, in one commit: `pipeline.sql` (source + Iceberg
   DDL + INSERT), `shop/main.py`, `generator/generator.py`, the tests, and Architecture §4.
 - **R-EVT-3** Timestamps MUST be UTC, timezone-naive, formatted `yyyy-MM-dd HH:mm:ss.SSS`. NEVER
   introduce `TIMESTAMP_LTZ` or a `Z` suffix without changing producers, Flink and the dashboard together.
-- **R-EVT-4** `orders` grain is one row per product line. Kafka key is `user_id`.
+- **R-EVT-4** `orders` grain is one row per product line. Kafka key is `user_id`. `inventory` grain is
+  one row per stock movement, keyed by `product_id`.
 
 ## R-SHOP: Storefront and money
 - **R-SHOP-1** The server owns prices, totals, order ids and `event_time`. NEVER trust these from the browser.
@@ -49,7 +51,9 @@
   idempotent (`INSERT OR IGNORE`); never overwrite existing rows from the seed file.
 - **R-CAT-4** New products go through `create_product()`, which enforces the next `P###` id,
   2-decimal prices, a unique name (case-insensitive) and an emoji from that category's `EMOJI` list.
-  The admin UI's checks are only for speed; the server decides.
+  The admin UI's checks are only for speed; the server decides. Ids are NEVER reused: the next id is one
+  past the highest id in `products` **or** `stock_movements`, so a deleted product's sales and stock
+  history never merge into a new product's.
 - **R-CAT-5** Seed products can't be deleted (403). Tests that create products on the live stack MUST
   delete them afterwards, so the demo catalog stays clean.
 - **R-CAT-7** Reviews (rating + count) can be set only on admin-added products. Ratings have one decimal
@@ -61,6 +65,24 @@
   (`shop/static/app.js`). Tests enforce this.
 - **R-CAT-3** Product emoji MUST render on Windows 10 (Emoji ≤ 12, code points < U+1FA70), and seed
   emoji MUST be in that category's admin picker list (`EMOJI` in `shop/main.py`).
+
+## R-INV: Inventory
+- **R-INV-1** The shop's SQLite database is the **system of record** for stock. `inventory_movements` in
+  the lakehouse is an analytics copy. Checkout decisions NEVER read Trino.
+- **R-INV-2** Every read-modify-write of stock runs in `transaction()` (`BEGIN IMMEDIATE`), which takes
+  the write lock *before* reading. A deferred `BEGIN` oversells under concurrency; the 25-thread race
+  test in `test_inventory_api.py` catches it.
+- **R-INV-3** Stock never goes negative. A checkout that exceeds stock is rejected whole with **409** and
+  a readable message ("Only N left of X" / "X is sold out"), and publishes nothing: no partial orders,
+  no back-orders.
+- **R-INV-4** Every stock change appends a `stock_movements` row (`reason`, `delta`, `on_hand_after`) in
+  the same transaction, and publishes its `inventory` event only **after** the commit. Current stock is
+  the latest movement per product (ordered by `event_time`, then `seq`), never a sum of deltas.
+- **R-INV-5** Forecast and reorder math lives in `dashboard/inventory.py` as pure, unit-tested functions.
+  SQL only prepares the zero-filled daily series. The Inventory tab counts in **demo days**
+  (`DEMO_DAY_SECONDS`, default 60 s); never mix demo days and calendar days.
+- **R-INV-6** A sold-out product's demand is censored (nobody can buy it), so its forecast is at least
+  the plain average and at least `MIN_SOLD_OUT_DEMAND`. A sold-out product always gets a suggestion.
 
 ## R-FLINK: Pipeline
 - **R-FLINK-1** DDL stays idempotent (`CREATE … IF NOT EXISTS`).
@@ -75,8 +97,9 @@
 - **R-SQL-1** Read Iceberg `summary` keys with `element_at(summary, 'key')`, NEVER `summary['key']`
   (Flink's empty commits lack keys).
 - **R-SQL-2** Time filters use `localtimestamp` (the dashboard session is UTC). Charts show UTC.
-- **R-SQL-3** The SQL playground stays read-only (`SELECT/WITH/SHOW/DESCRIBE/EXPLAIN`). The only write
-  in the dashboard is the explicit OPTIMIZE button.
+- **R-SQL-3** The SQL playground stays read-only (`SELECT/WITH/SHOW/DESCRIBE/EXPLAIN`). The dashboard
+  writes only through explicit buttons: OPTIMIZE (Trino), and Restock, which calls the shop's API
+  (`POST /api/products/{id}/restock`). It never writes stock itself.
 - **R-SQL-5** Charts built on windowed gold tables MUST also show the still-open windows (computed from
   bronze, marked provisional), because windows don't close while the store is quiet.
 - **R-SQL-6** Test connections to Trino MUST use `timezone="UTC"`, like the dashboard. Otherwise
@@ -95,6 +118,8 @@
   tabs and KPI tiles in a browser.
 - **R-UI-5** Accessibility basics: labelled inputs, keyboard-operable controls, visible focus, and
   colour is never the only signal.
+- **R-UI-6** Widgets in auto-refreshing fragments MUST keep stable options. Streamlit resets a select
+  whose options change, so never order options by live data; seed defaults through `st.session_state`.
 
 ## R-OPS: Docker and runtime
 - **R-OPS-1** In `docker-compose.yml`, keep each shell command in `command:` on one line (YAML
@@ -107,6 +132,10 @@
   9000/9001 RustFS, 29092 Kafka. 8080 is avoided on purpose (usually taken).
 - **R-OPS-5** Files mounted into containers are LF-only (`.gitattributes`). Don't remove it.
 - **R-OPS-6** Pin image and package versions. Never use `:latest` in compose.
+- **R-OPS-7** The toolbox (root `Dockerfile`, compose profile `tools`) is based on
+  `python:3.12-slim-bookworm`: Playwright 1.49's `install --with-deps` doesn't support Debian 13.
+  Bump the base image and Playwright together. `.dockerignore` keeps `.venv`, `.git` and the developer
+  database out of the image.
 
 ## R-GIT: Repository hygiene
 - **R-GIT-1** Commit or push only when the owner asks. Commit messages explain *why*, and end with the
@@ -115,5 +144,5 @@
 - **R-GIT-3** When behaviour changes, update the docs in the same change: README, `CLAUDE.md`, and
   the relevant `docs/ai/*` file (Architecture for interfaces, Rules for invariants, Memory for lessons,
   Phases for milestones).
-- **R-GIT-4** When the UI changes visibly, regenerate the screenshots with `scripts/demo.py`, then
-  review every image before committing.
+- **R-GIT-4** When the UI changes visibly, regenerate the screenshots with `docker compose run --rm demo`
+  (or `scripts/demo.py`), then review every image before committing.

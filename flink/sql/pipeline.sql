@@ -60,6 +60,31 @@ CREATE TEMPORARY TABLE orders_src (
     'json.ignore-parse-errors' = 'true'
 );
 
+-- Stock movements from the shop (the system of record for stock). No windows are computed on it,
+-- so it needs no watermark. `seq` is the shop ledger's global order of movements.
+CREATE TEMPORARY TABLE inventory_src (
+    seq                BIGINT,
+    product_id         STRING,
+    product_name       STRING,
+    category           STRING,
+    reason             STRING,       -- initial | snapshot | order | restock | settings | removed
+    delta              INT,
+    on_hand_after      INT,
+    unit_price         DECIMAL(10, 2),
+    lead_time_days     INT,          -- demo days a refill takes to arrive
+    target_cover_days  INT,          -- demo days of demand a refill should cover
+    event_time         TIMESTAMP(3)
+) WITH (
+    'connector' = 'kafka',
+    'topic' = 'inventory',
+    'properties.bootstrap.servers' = 'kafka:9092',
+    'properties.group.id' = 'flink-lakehouse',
+    'properties.auto.offset.reset' = 'earliest',
+    'scan.startup.mode' = 'group-offsets',
+    'format' = 'json',
+    'json.ignore-parse-errors' = 'true'
+);
+
 -- ---------------------------------------------------------------------
 -- 2. Sink catalog: Iceberg REST catalog, data files on RustFS (S3 API)
 -- ---------------------------------------------------------------------
@@ -112,6 +137,25 @@ CREATE TABLE IF NOT EXISTS lakehouse.shop.orders (
     'write.parquet.compression-codec' = 'zstd'
 );
 
+-- Bronze: every stock movement. Current stock = the latest movement per product.
+CREATE TABLE IF NOT EXISTS lakehouse.shop.inventory_movements (
+    seq                BIGINT,
+    product_id         STRING,
+    product_name       STRING,
+    category           STRING,
+    reason             STRING,
+    delta              INT,
+    on_hand_after      INT,
+    unit_price         DECIMAL(10, 2),
+    lead_time_days     INT,
+    target_cover_days  INT,
+    event_time         TIMESTAMP(3),
+    event_date         DATE
+) PARTITIONED BY (event_date) WITH (
+    'format-version' = '2',
+    'write.parquet.compression-codec' = 'zstd'
+);
+
 -- Gold: 1-minute tumbling-window aggregates (append-only, emitted when the
 -- watermark passes window_end, i.e. ~1 min + 5 s after the window opens)
 CREATE TABLE IF NOT EXISTS lakehouse.shop.revenue_per_minute (
@@ -132,7 +176,7 @@ CREATE TABLE IF NOT EXISTS lakehouse.shop.funnel_per_minute (
 ) WITH ('format-version' = '2');
 
 -- ---------------------------------------------------------------------
--- 3. One Flink job for all four inserts (sources are shared/reused)
+-- 3. One Flink job for all five inserts (sources are shared/reused)
 -- ---------------------------------------------------------------------
 EXECUTE STATEMENT SET
 BEGIN
@@ -147,6 +191,11 @@ SELECT order_id, session_id, user_id, product_id, product_name, category,
        quantity, unit_price, total_amount, country, payment_method,
        event_time, CAST(event_time AS DATE)
 FROM orders_src;
+
+INSERT INTO lakehouse.shop.inventory_movements
+SELECT seq, product_id, product_name, category, reason, delta, on_hand_after, unit_price,
+       lead_time_days, target_cover_days, event_time, CAST(event_time AS DATE)
+FROM inventory_src;
 
 INSERT INTO lakehouse.shop.revenue_per_minute
 SELECT window_start, window_end, category,

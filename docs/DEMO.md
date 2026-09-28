@@ -6,8 +6,8 @@ You shop in a real store, and seconds later the purchase shows up in a lakehouse
 ## Before the demo (5 minutes)
 
 ```bash
-docker compose up -d --build                           # start everything
-.venv/Scripts/python scripts/demo.py --no-screenshots  # optional: 4 min of shopper traffic so charts are full
+docker compose up -d --build                    # start everything
+docker compose run --rm demo --no-screenshots   # optional: 4 min of shopper traffic so charts are full
 ```
 
 Open two browser windows side by side:
@@ -47,7 +47,8 @@ Each add sends an `add_to_cart` event. The cart survives a page reload, since it
 ![Declined card](screenshots/store-declined.png)
 
 Try the declined test card `4000 0000 0000 0002` first: the payment fails and **no order event is
-produced**. Then press **Fill test card** (`4242 4242 4242 4242`), or choose UPI or cash on delivery.
+produced**. The same goes for asking for more than is in stock: the checkout is refused with
+"Only N left of …", and nothing is emitted. Then press **Fill test card** (`4242 4242 4242 4242`), or choose UPI or cash on delivery.
 
 ![Checkout](screenshots/store-checkout.png)
 
@@ -71,6 +72,11 @@ preview shows exactly how the store will display it.
 Save it, press **View** to jump to it in the store, and buy it. Its order reaches the dashboard like
 any other, because it has the same event contract.
 
+Every product has stock. Press **📦** on any row to restock it, or to change its lead time and target
+cover, which drive the dashboard's reorder suggestions:
+
+![Stock dialog](screenshots/admin-stock.png)
+
 ## 5 · Watch it land (about 15 seconds)
 
 ![Dashboard](screenshots/dashboard-light.png)
@@ -89,7 +95,26 @@ Dark mode is a toggle in the sidebar, or the link http://localhost:8501/?theme=d
 
 ![Dashboard dark mode](screenshots/dashboard-dark.png)
 
-## 6 · Under the hood: the lakehouse
+## 6 · Inventory: from sales to reorder suggestions
+
+![Inventory tab](screenshots/dashboard-inventory.png)
+
+Open **📦 Inventory** on the dashboard.
+
+- The shop owns the stock. A checkout takes it inside one database transaction, so two shoppers can
+  never both buy the last unit. Every stock change is also an `inventory` event, and Flink writes it
+  to the Iceberg table `inventory_movements`.
+- **Days of cover** puts each product's stock next to its lead time (the black tick). A bar shorter than
+  its tick runs out before a refill ordered now could arrive.
+- **Reorder suggestions** come from a forecast: an EWMA of daily sales plus the trend, a safety stock
+  for volatile demand, then "order up to lead time + target cover". A demo day is 60 s, so a few
+  minutes of traffic are two weeks of history.
+- Press **Restock** on a suggestion. The dashboard calls the shop, and about 10 s later the new stock
+  comes back through Kafka, Flink and Iceberg.
+- A good question for the audience: a sold-out product sold nothing today, so why is its forecast not
+  zero? (Nobody *could* buy it: the demand is censored, so the forecast uses the average instead.)
+
+## 7 · Under the hood: the lakehouse
 
 ![Lakehouse internals](screenshots/dashboard-internals.png)
 
@@ -102,7 +127,7 @@ Dark mode is a toggle in the sidebar, or the link http://localhost:8501/?theme=d
 The SQL playground runs read-only SQL across tables that a streaming job wrote and a batch engine
 reads. *Cart abandonment by category* joins `clicks` and `orders`.
 
-## 7 · The mobile view
+## 8 · The mobile view
 
 <img src="screenshots/store-mobile.png" width="320" alt="Lakeshop on mobile">
 
@@ -112,4 +137,5 @@ reads. *Cart abandonment by category* joins `clicks` and `orders`.
 arriving in Kafka (http://localhost:8088), and the Parquet files in the RustFS console
 (http://localhost:9001, `admin` / `password`).
 
-To refresh these screenshots after a UI change: `.venv/Scripts/python scripts/demo.py`.
+To refresh these screenshots after a UI change: `docker compose run --rm demo` (rebuild the toolbox
+first with `docker compose build tests`), or `.venv/Scripts/python scripts/demo.py` locally.

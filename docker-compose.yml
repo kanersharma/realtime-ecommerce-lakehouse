@@ -49,7 +49,7 @@ services:
     depends_on: { kafka: { condition: service_healthy } }
     entrypoint: ["/bin/sh", "-c"]
     command: >
-      "for t in clicks orders; do
+      "for t in clicks orders inventory; do
        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic $$t --partitions 3 --replication-factor 1 --config retention.ms=86400000;
        done"
 
@@ -189,6 +189,29 @@ services:
     environment:
       TRINO_HOST: trino
       TRINO_PORT: 8080
+      SHOP_URL: http://shop:8000   # "Restock" buttons call the shop, the system of record for stock
+      DEMO_DAY_SECONDS: "60"       # 1 demo day = 60 s, so forecasts and lead times move during a demo
+
+  # ---------- Tools: run on demand, only Docker needed (root Dockerfile) ----------
+  tests:  # docker compose run --rm tests
+    build: .
+    image: lakehouse-tools
+    profiles: ["tools"]
+    environment:
+      SHOP_URL: http://shop:8000
+      TRINO_HOST: trino
+      TRINO_PORT: 8080
+    command: ["python", "-m", "pytest", "-rs"]
+
+  demo:  # docker compose run --rm demo [--traffic-minutes N] [--no-screenshots]
+    build: .
+    image: lakehouse-tools
+    profiles: ["tools"]
+    environment:
+      SHOP_URL: http://shop:8000
+      DASHBOARD_URL: http://dashboard:8501
+    volumes: ["./docs/screenshots:/work/docs/screenshots"]
+    entrypoint: ["python", "scripts/demo.py"]
 
 volumes:
   shop-data:

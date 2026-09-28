@@ -8,7 +8,8 @@ A laptop-runnable **streaming lakehouse** with a real storefront on top. A shopp
 **Lakeshop** (search, cart, fake checkout); every action becomes a Kafka event. Flink SQL writes those
 events exactly-once into Apache Iceberg; Trino queries them; a **live dashboard** shows the business
 metrics about 10–15 s later, along with the lakehouse internals (snapshots, small files, compaction,
-time travel). One command starts everything: `docker compose up -d --build`.
+time travel). Orders consume real stock, and an inventory view forecasts demand and suggests reorders.
+One command starts everything: `docker compose up -d --build`.
 
 ## 2. Problem
 - Most streaming demos stop at "events go into Kafka" and use a synthetic generator. This one starts
@@ -56,14 +57,14 @@ time travel). One command starts everything: `docker compose up -d --build`.
 | S-12 | Catalog admin (`/admin.html`): list, search and filter all products, with stats |
 | S-13 | "+ Add product": name, category, price, badge, description, and an emoji picker per category, with a live preview; the product is instantly buyable and its orders reach the dashboard |
 | S-14 | Admin-added products persist across restarts and can be deleted; seed products are protected |
+| S-15 | Inventory: stock per product, owned by the shop. A checkout takes stock atomically and is refused whole with a clear message ("Only N left of X", "X is sold out") when stock is short, so nothing is ever oversold. The store shows "Only N left" and SOLD OUT; the admin restocks and sets lead time and target cover per product |
 | S-16 | Reviews for admin-added products: set a rating and count by hand or generate realistic random ones, when adding or later |
-| S-15 | *(Phase 9)* Inventory: stock per product, decremented by orders and increased by restocks, with a forecasting and reorder dashboard (see Phases.md §2.0) |
 
 ### 6.2 Pipeline
 | ID | Requirement |
 |---|---|
-| P-1 | Kafka topics `clicks` and `orders` (3 partitions each, keyed by `user_id`) |
-| P-2 | Flink SQL job with 4 sinks: bronze `clicks` and `orders`; gold `revenue_per_minute` and `funnel_per_minute` |
+| P-1 | Kafka topics `clicks` and `orders` (keyed by `user_id`) and `inventory` (keyed by `product_id`), 3 partitions each |
+| P-2 | Flink SQL job with 5 sinks: bronze `clicks`, `orders` and `inventory_movements`; gold `revenue_per_minute` and `funnel_per_minute` |
 | P-3 | Event-time processing: 5 s watermark and 1-minute tumbling windows |
 | P-4 | Exactly-once into Iceberg through 10 s checkpoints |
 | P-5 | The job is submitted automatically and never duplicated |
@@ -78,14 +79,16 @@ time travel). One command starts everything: `docker compose up -d --build`.
 | D-4 | SQL playground, read-only (`SELECT/WITH/SHOW/DESCRIBE/EXPLAIN` only), with examples |
 | D-5 | Light and dark themes, persisted in the URL (`?theme=dark`) |
 | D-6 | A friendly "waiting for data" state that points users to the store |
+| D-7 | Inventory tab: current stock from the lakehouse, a demand forecast per product (EWMA + trend over zero-filled daily sales), safety stock, reorder point and suggested quantity from lead time and target cover, days of cover, and one-click Restock through the shop's API. Days are demo days (60 s by default) so a live demo shows the whole cycle in minutes |
 
 ### 6.4 Developer experience
 | ID | Requirement |
 |---|---|
 | X-1 | `docker compose up -d --build` starts everything; `down -v` wipes it |
-| X-2 | `pytest` suite: unit, contract, API, dashboard, browser e2e and live integration tests (91 today) |
+| X-2 | `pytest` suite: unit, contract, API, dashboard, browser e2e and live integration tests |
 | X-3 | `scripts/demo.py` generates traffic and regenerates the README screenshots |
 | X-4 | Docs: README, `docs/DEMO.md`, `CLAUDE.md`, `docs/ai/*` |
+| X-5 | Toolbox: with only Docker installed, `docker compose run --rm tests` runs the whole suite (including browser and live integration tests) and `docker compose run --rm demo` runs X-3 |
 
 ## 7. Non-functional requirements
 | Area | Target |
@@ -93,7 +96,7 @@ time travel). One command starts everything: `docker compose up -d --build`.
 | Freshness | Event to visible in Trino in ≤ ~15 s (checkpoint 10 s + commit) |
 | Footprint | Whole stack ≤ ~5 GB RAM; Docker Desktop needs ≥ 6 GB allocated |
 | Startup | Pipeline running within ~2 min of `up` (after images are cached) |
-| Correctness | No duplicate or partial rows (exactly-once); the server sets prices and totals |
+| Correctness | No duplicate or partial rows (exactly-once); the server sets prices and totals; stock never goes negative, even under concurrent checkouts |
 | Security | Demo credentials only; card data never stored, logged or emitted; read-only SQL playground |
 | Accessibility | Keyboard-operable store (native `<dialog>`, focus states), labelled inputs, colour never the only signal |
 | Portability | Works on Windows, macOS and Linux (LF line endings enforced for mounted files) |
@@ -101,8 +104,9 @@ time travel). One command starts everything: `docker compose up -d --build`.
 ## 8. Success metrics
 - A new visitor goes from `git clone` to seeing their own order on the dashboard in **< 15 minutes**.
 - The test suite is green with **zero skips** when the stack is up.
-- README screenshots match the current UI (regenerate with `scripts/demo.py`).
+- README screenshots match the current UI (regenerate with `docker compose run --rm demo`).
 
 ## 9. Open questions and future scope
-See [Phases.md](Phases.md) §2: Schema Registry/Avro, CDC upserts, late-event handling, scheduled
-table maintenance, a Postgres-backed catalog, data-quality checks, CI, Kubernetes, and a hosted demo.
+See [Phases.md](Phases.md) §2: inventory follow-ups (stock in transit, a transactional outbox),
+Schema Registry/Avro, CDC upserts, late-event handling, scheduled table maintenance, a production
+catalog server, data-quality checks, CI, Kubernetes, and a hosted demo.

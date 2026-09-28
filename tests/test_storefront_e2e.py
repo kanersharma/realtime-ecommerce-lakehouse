@@ -5,6 +5,7 @@ exactly which Kafka events its clicks produced. Uses the installed Edge by defau
 E2E_BROWSER=chromium to use Playwright's bundled Chromium instead.
 """
 import os
+import re
 import socket
 import threading
 import time
@@ -30,7 +31,11 @@ def matching(q):
 
 
 @pytest.fixture(scope="module")
-def base_url():
+def base_url(tmp_path_factory):
+    # The server's startup (stock snapshot) runs before any test sets SHOP_DB: give it its own temp
+    # database so it never touches the developer's shop/data/shop.db (Rules R-CAT-6).
+    previous_db = os.environ.get("SHOP_DB")
+    os.environ["SHOP_DB"] = str(tmp_path_factory.mktemp("e2e") / "startup.db")
     original = shop.publish
     shop.publish = lambda topic, key, event: SENT.append((topic, key, event))
     with socket.socket() as s:
@@ -47,13 +52,20 @@ def base_url():
     server.should_exit = True
     thread.join(5)
     shop.publish = original
+    if previous_db is None:
+        os.environ.pop("SHOP_DB", None)
+    else:
+        os.environ["SHOP_DB"] = previous_db
 
 
 @pytest.fixture(scope="module")
 def browser():
     with playwright_api.sync_playwright() as p:
         channel = os.getenv("E2E_BROWSER", "msedge")
-        b = p.chromium.launch(**({} if channel == "chromium" else {"channel": channel}))
+        # lakeshop.test -> 127.0.0.1: a plain-http, non-localhost origin, i.e. NOT a secure context
+        # (like http://shop:8000 in Docker or a LAN IP from a phone)
+        args = ["--host-resolver-rules=MAP lakeshop.test 127.0.0.1"]
+        b = p.chromium.launch(args=args, **({} if channel == "chromium" else {"channel": channel}))
         yield b
         b.close()
 
@@ -204,7 +216,7 @@ def test_checkout_succeeds_and_emits_orders(page, method, fill, paid_with):
     assert {e["product_id"] for e in orders} == {"P015", "P024"}
     assert all(e["payment_method"] == method and e["country"] == "DE" for e in orders)
     # the whole funnel belongs to one session, so the dashboard's conversion counts it
-    assert len({e["session_id"] for _, _, e in SENT}) == 1
+    assert len({e["session_id"] for t, _, e in SENT if t in ("clicks", "orders")}) == 1
 
 
 def test_only_the_selected_payment_fields_show(page):
@@ -459,4 +471,120 @@ def test_edit_reviews_of_an_added_product(page, base_url):
     page.locator("#rev-clear").click()
     page.locator("#rev-save").click()
     expect(page.locator('tr[data-id="P049"]')).to_contain_text("No reviews yet")
+
+
+# ------------------------------------------------ stock (inventory phase)
+def add_via_api(base_url, **over):
+    import httpx
+    body = {**NEW, "price": 49.99, **over}
+    r = httpx.post(f"{base_url}/api/products", json=body)
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def cod_checkout(page):
+    open_checkout(page)
+    page.locator('input[name="name"]').fill("Test Shopper")
+    page.locator('input[name="method"][value="cod"]').check()
+    page.locator("#pay-btn").click()
+
+
+def test_low_stock_and_selling_out_in_the_store(page, base_url):
+    add_via_api(base_url, stock=3)
+    page.goto(f"{base_url}/?q=Game Controller")
+    tile = page.locator('.product[data-id="P049"]')
+    expect(tile).to_contain_text("Only 3 left")
+    tile.click()
+    expect(page.locator("#pd-stock")).to_have_text("Only 3 left")
+    for _ in range(5):                                    # the stepper stops at the stock level
+        page.locator("#pd-plus").click()
+    expect(page.locator("#pd-qty")).to_have_text("3")
+    page.locator("#pd-add").click()
+    cod_checkout(page)
+    expect(page.locator("#co-success")).to_be_visible()
+    assert shop.catalog()["P049"]["on_hand"] == 0
+    page.keyboard.press("Escape")
+    expect(tile).to_have_class(re.compile("soldout"))       # refreshed after checkout
+    expect(tile.locator("[data-add]")).to_be_disabled()
+    expect(tile).to_contain_text("SOLD OUT")
+    tile.click()
+    expect(page.locator("#pd-stock")).to_have_text("Sold out")
+    expect(page.locator("#pd-add")).to_be_disabled()
+    inv = [e for e in sent("inventory") if e["reason"] == "order"]
+    assert [(e["product_id"], e["delta"], e["on_hand_after"]) for e in inv] == [("P049", -3, 0)]
+
+
+def test_checkout_beyond_stock_shows_the_reason(page, base_url):
+    add_via_api(base_url, stock=2)
+    page.goto(f"{base_url}/?q=Game Controller")
+    page.get_by_role("button", name="Add Game Controller to cart").click()
+    shop.reserve_stock(shop.Checkout(user_id="W-other0001", session_id="S-other0001", name="Other", country="IN",
+                                     items=[shop.Line(product_id="P049", quantity=2)],
+                                     payment=shop.Payment(method="cod")), shop.now())  # someone else buys it all
+    cod_checkout(page)
+    expect(page.locator("#co-error")).to_have_text("Game Controller is sold out.")
+    expect(page.locator("#cart-count")).to_have_text("1")    # the cart is kept so the shopper can adjust
+    assert sent("orders") == []
+
+
+def test_admin_restock_and_reorder_settings(page, base_url):
+    add_via_api(base_url, stock=0)
+    open_admin(page, base_url)
+    row = page.locator('tr[data-id="P049"]')
+    expect(row).to_contain_text("SOLD OUT")
+    expect(page.locator("#st-stock-split")).to_contain_text("1 sold out")
+    expect(page.locator("[data-stock]")).to_have_count(len(catalog()))   # every product, seed included
+    row.locator("[data-stock]").click()
+    expect(page.locator("#stock-now")).to_have_text("0")
+    page.locator('#stock-form [data-plus="10"]').click()
+    page.locator('#stock-form [data-plus="50"]').click()
+    expect(page.locator('#stock-form [name="quantity"]')).to_have_value("60")
+    page.locator('#stock-form [name="lead_time_days"]').fill("0")
+    page.locator("#stock-save").click()
+    expect(page.locator("#stock-error")).to_contain_text("Lead time must be")
+    page.locator('#stock-form [name="lead_time_days"]').fill("8")
+    page.locator("#stock-save").click()
+    expect(page.locator("#stock-dlg")).to_be_hidden()
+    expect(page.locator("#toast")).to_contain_text("Restocked Game Controller: +60")
+    expect(row).to_contain_text("60")
+    p = shop.catalog()["P049"]
+    assert (p["on_hand"], p["lead_time_days"]) == (60, 8)
+    assert [e["reason"] for e in sent("inventory")] == ["initial", "restock", "settings"]  # create, then the dialog
+
+
+def test_add_product_with_inventory_fields(page, base_url):
+    open_admin(page, base_url)
+    fill_new_product(page)
+    form = page.locator("#add-form")
+    expect(form.locator('[name="stock"]')).to_have_value("50")
+    expect(form.locator('[name="target_cover_days"]')).to_have_value("7")
+    expect(form.locator('[name="lead_time_days"]')).to_have_attribute("placeholder", "5")  # Electronics default
+    form.locator('[name="stock"]').fill("4")
+    expect(page.locator("#preview")).to_contain_text("Only 4 left")
+    form.locator('[name="lead_time_days"]').fill("11")
+    page.locator("#save-btn").click()
+    expect(page.locator("#add-dlg")).to_be_hidden()
+    p = shop.catalog()["P049"]
+    assert (p["on_hand"], p["lead_time_days"], p["target_cover_days"]) == (4, 11, 7)
+    expect(page.locator('tr[data-id="P049"]')).to_contain_text("4 · low")
+
+
+def test_store_works_outside_a_secure_context(browser, base_url):
+    """crypto.randomUUID only exists in secure contexts (https, localhost). Opened over plain http on
+    another host (Docker service name, LAN IP) the store must still load, and track with valid ids."""
+    SENT.clear()
+    port = base_url.rsplit(":", 1)[1]
+    context = browser.new_context()
+    pg = context.new_page()
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(f"http://lakeshop.test:{port}")
+    assert pg.evaluate("window.isSecureContext") is False
+    expect(pg.locator(".product")).to_have_count(len(catalog()))
+    pg.get_by_role("button", name="4K Monitor, $329.00").click()
+    wait_for(lambda: sent("clicks", "page_view"))
+    (e,) = sent("clicks", "page_view")
+    assert re.fullmatch(r"S-[0-9a-f]{16}", e["session_id"]) and re.fullmatch(r"W-[0-9a-f]{16}", e["user_id"])
+    context.close()
+    assert errors == []
 

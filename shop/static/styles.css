@@ -31,7 +31,8 @@ code { background: var(--yellow); padding: 0 4px; border-radius: 4px; }
 .btn:hover { transform: translate(2px, 2px); box-shadow: 2px 2px 0 var(--ink); }
 .btn:active { transform: translate(4px, 4px); box-shadow: none; }
 .btn:focus-visible, button:focus-visible, a:focus-visible { outline: 3px solid var(--pink); outline-offset: 2px; }
-.btn:disabled { opacity: .6; cursor: progress; }
+.btn:disabled { cursor: not-allowed; box-shadow: none; transform: none; opacity: .55; }
+#pay-btn:disabled, #save-btn:disabled { cursor: progress; }  /* busy, not unavailable */
 .btn-ink { background: var(--ink); color: #fff; box-shadow: 4px 4px 0 var(--pink); }
 .btn-pink { background: var(--pink); }
 .btn.small { padding: 4px 10px; font-size: .85rem; box-shadow: 3px 3px 0 var(--ink); }
@@ -92,6 +93,14 @@ main { padding: 28px clamp(16px, 4vw, 40px) 60px; max-width: 1320px; margin: 0 a
          background: var(--ink); color: #fff; padding: 2px 8px; border-radius: 6px; }
 .stripe { width: 28px; height: 6px; border-radius: 3px; border: 1.5px solid var(--ink); }
 .rating { margin: 0; font-size: .85rem; font-weight: 700; }
+/* stock: sold-out tiles fade and get a stamp; low stock is red text (always with words, never color alone) */
+.stock-low { margin: 0; font-size: .85rem; font-weight: 700; color: #B3261E; }
+.product.soldout .art { filter: grayscale(.85); opacity: .55; }
+.soldout-tag { position: absolute; inset: 50% auto auto 50%; transform: translate(-50%, -50%) rotate(-8deg);
+               font: 700 .95rem 'Space Grotesk'; letter-spacing: .08em; background: var(--ink); color: #fff;
+               padding: 4px 12px; border-radius: 8px; white-space: nowrap; }
+.stock { margin: 0; font-weight: 700; }
+.stock.low, .stock.out { color: #B3261E; }
 .empty { font-weight: 700; font-size: 1.1rem; }
 
 /* ------------------------------------------------ dialogs (native <dialog>: focus trap + Esc for free) */
@@ -168,9 +177,10 @@ input:focus, select:focus { outline: 3px solid var(--pink); outline-offset: 0; }
 /* ------------------------------------------------ catalog admin (admin.html) */
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .admin .topbar > .pill { font-size: .8rem; }
-.admin .stats .stat-total { grid-column: span 4; background: var(--yellow); }
-.admin .stats .stat-price { grid-column: span 4; background: var(--mint); }
-.admin .stats .stat-new { grid-column: span 4; background: var(--blue); }
+.admin .stats .stat-total { grid-column: span 3; background: var(--yellow); }
+.admin .stats .stat-price { grid-column: span 3; background: var(--mint); }
+.admin .stats .stat-stock { grid-column: span 3; background: #FFB27A; }
+.admin .stats .stat-new { grid-column: span 3; background: var(--blue); }
 .admin .stats .big { font-size: 3rem; margin: 8px 0 0; line-height: 1; }
 .admin .stats .tile p { margin: 6px 0 0; }
 .admin .stats .cats { grid-column: span 12; display: grid; grid-template-columns: repeat(7, 1fr); gap: 12px; padding: 14px; }
@@ -191,6 +201,9 @@ table.catalog { width: 100%; border-collapse: collapse; font-size: .92rem; }
 .thumb { display: grid; place-items: center; width: 44px; height: 44px; font-size: 1.6rem; border: 2px solid var(--ink); border-radius: 10px; }
 .chip { display: inline-block; border: 2px solid var(--ink); border-bottom-width: 5px; border-radius: 8px; padding: 1px 8px; font-weight: 700; font-size: .8rem; background: var(--card); }
 .chip-new { background: var(--yellow); border-bottom-width: 2px; }
+.chip-out { background: #FFD6D6; border-bottom-width: 2px; color: #B3261E; }
+.chip-low { background: #FFE9C7; border-bottom-width: 2px; }
+.stock-now { font: 2.4rem 'Archivo Black', sans-serif; margin: 0; }
 .badge-inline { font: 700 .7rem 'Space Grotesk'; letter-spacing: .06em; background: var(--ink); color: #fff; padding: 2px 8px; border-radius: 6px; }
 tr.flash { animation: flash 2.4s ease-out; }
 @keyframes flash { 0%, 40% { background: var(--yellow); } 100% { background: transparent; } }
@@ -216,13 +229,13 @@ tr.flash { animation: flash 2.4s ease-out; }
 .rev-preview { font-size: 1.1rem; margin: 0; }
 
 @media (max-width: 1000px) {
-  .admin .stats .stat-total, .admin .stats .stat-price, .admin .stats .stat-new { grid-column: span 2; }
+  .admin .stats .stat-total, .admin .stats .stat-price, .admin .stats .stat-stock, .admin .stats .stat-new { grid-column: span 3; }
   .admin .stats .cats { grid-column: span 6; grid-template-columns: repeat(4, 1fr); }
   .add-layout { grid-template-columns: 1fr; }
   .preview { position: static; }
 }
 @media (max-width: 640px) {
-  .admin .stats .stat-total, .admin .stats .stat-price, .admin .stats .stat-new, .admin .stats .cats { grid-column: span 2; }
+  .admin .stats .stat-total, .admin .stats .stat-price, .admin .stats .stat-stock, .admin .stats .stat-new, .admin .stats .cats { grid-column: span 2; }
   .admin .stats .cats { grid-template-columns: repeat(3, 1fr); }
   .emoji-grid { grid-template-columns: repeat(6, 1fr); }
   .catalog .desc { max-width: 180px; }

@@ -2,9 +2,14 @@
 //   open a product -> page_view, add to cart -> add_to_cart, pay -> one order per cart line.
 // Shared helpers ($, money, esc, CATS, api, toast, ratingText) live in common.js.
 const FEATURED = "P021";
+const LOW_STOCK = 5; // "Only N left" at or below this
+const maxQty = (p) => Math.max(0, Math.min(10, p.on_hand)); // per product in the cart
 
 // Anonymous ids: the user id persists in this browser, the session id lasts for the tab session.
-const newId = (prefix) => prefix + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+// crypto.getRandomValues works in every context; crypto.randomUUID only in secure ones (https, localhost),
+// so over http://shop:8000 or a LAN IP the store would not even start.
+const newId = (prefix) =>
+  prefix + Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("");
 const store = (area, key, make) => area.getItem(key) || (area.setItem(key, make()), area.getItem(key));
 const USER = store(localStorage, "ls_user", () => newId("W-"));
 const SESSION = store(sessionStorage, "ls_session", () => newId("S-"));
@@ -36,17 +41,21 @@ function bumpEvents(n, label) {
 function productTile(p) {
   const c = CATS[p.category];
   const wide = p.badge === "Bestseller";
+  const out = p.on_hand <= 0;
+  const low = !out && p.on_hand <= LOW_STOCK;
   return `
-    <article class="tile product${wide ? " wide" : ""}" data-id="${p.id}" tabindex="0" role="button" aria-label="${esc(p.name)}, ${money.format(p.price)}">
-      <div class="art" style="background:${c.tint}">${esc(p.emoji)}${p.badge ? `<span class="badge">${esc(p.badge.toUpperCase())}</span>` : ""}</div>
+    <article class="tile product${wide ? " wide" : ""}${out ? " soldout" : ""}" data-id="${p.id}" tabindex="0" role="button"
+             aria-label="${esc(p.name)}, ${money.format(p.price)}${out ? ", sold out" : ""}">
+      <div class="art" style="background:${c.tint}">${esc(p.emoji)}${p.badge ? `<span class="badge">${esc(p.badge.toUpperCase())}</span>` : ""}${out ? '<span class="soldout-tag">SOLD OUT</span>' : ""}</div>
       <div class="body">
         <span class="stripe" style="background:${c.color}" title="${p.category}"></span>
         <h3>${esc(p.name)}</h3>
         <p class="rating">${esc(ratingText(p))}</p>
+        ${low ? `<p class="stock-low">Only ${p.on_hand} left</p>` : ""}
         ${wide ? `<p class="desc">${esc(p.description)}</p>` : ""}
         <div class="foot">
           <p class="price">${money.format(p.price)}</p>
-          <button class="btn small" data-add="${p.id}" aria-label="Add ${esc(p.name)} to cart">+ Add</button>
+          <button class="btn small" data-add="${p.id}" aria-label="Add ${esc(p.name)} to cart"${out ? " disabled" : ""}>${out ? "Sold out" : "+ Add"}</button>
         </div>
       </div>
     </article>`;
@@ -85,7 +94,11 @@ function openProduct(id) {
   $("#pd-rating").textContent = p.reviews ? `${ratingText(p)} reviews` : ratingText(p);
   $("#pd-desc").textContent = p.description;
   $("#pd-price").textContent = money.format(p.price);
-  $("#pd-qty").value = 1;
+  const out = p.on_hand <= 0;
+  $("#pd-stock").textContent = out ? "Sold out" : p.on_hand <= LOW_STOCK ? `Only ${p.on_hand} left` : "In stock";
+  $("#pd-stock").className = `stock${out ? " out" : p.on_hand <= LOW_STOCK ? " low" : ""}`;
+  $("#pd-add").disabled = out;
+  $("#pd-qty").value = out ? 0 : 1;
   $("#product-dlg").showModal();
   track("page_view", id);
 }
@@ -99,10 +112,30 @@ function saveCart() {
 }
 
 function addToCart(id, qty = 1) {
-  cart[id] = Math.min((cart[id] || 0) + qty, 10);
+  const p = byId[id];
+  const room = maxQty(p) - (cart[id] || 0);
+  if (room <= 0) {
+    toast(p.on_hand <= 0 ? `${p.name} is sold out` : `Only ${p.on_hand} left, all in your cart`);
+    return;
+  }
+  const added = Math.min(qty, room);
+  cart[id] = (cart[id] || 0) + added;
   saveCart();
-  toast(`Added ${byId[id].emoji} ${byId[id].name}`);
+  toast(added < qty ? `Only ${p.on_hand} left: added ${added}` : `Added ${p.emoji} ${p.name}`);
   track("add_to_cart", id);
+}
+
+// Stock changes with every order (ours and other shoppers'), so re-read it after checkout attempts.
+async function refreshProducts() {
+  try {
+    products = await api("/api/products");
+  } catch {
+    return;
+  }
+  byId = Object.fromEntries(products.map((p) => [p.id, p]));
+  renderCategories();
+  render();
+  renderCart();
 }
 
 const subtotal = () => Object.entries(cart).reduce((s, [id, q]) => s + byId[id].price * q, 0);
@@ -113,7 +146,8 @@ function renderCart() {
     const p = byId[id];
     return `<div class="line">
       <span class="e" style="background:${CATS[p.category].tint}">${p.emoji}</span>
-      <div class="t"><strong>${esc(p.name)}</strong><span class="muted">${money.format(p.price)}</span></div>
+      <div class="t"><strong>${esc(p.name)}</strong><span class="muted">${money.format(p.price)}</span>
+        ${q > p.on_hand ? `<span class="stock-low">${p.on_hand <= 0 ? "Sold out" : `Only ${p.on_hand} left`}</span>` : ""}</div>
       <div class="stepper" role="group" aria-label="Quantity of ${esc(p.name)}">
         <button type="button" data-dec="${id}" aria-label="Decrease">−</button><output>${q}</output><button type="button" data-inc="${id}" aria-label="Increase">+</button>
       </div>
@@ -171,6 +205,7 @@ async function pay(e) {
   } finally {
     btn.disabled = false;
     btn.textContent = `Pay ${money.format(subtotal())}`;
+    refreshProducts(); // shows the new stock (or why a line didn't fit)
   }
 }
 
@@ -194,14 +229,14 @@ $("#products").addEventListener("keydown", (e) => {
   if (tile && e.target === tile && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openProduct(tile.dataset.id); }
 });
 $("#pd-minus").onclick = () => ($("#pd-qty").value = Math.max(1, +$("#pd-qty").value - 1));
-$("#pd-plus").onclick = () => ($("#pd-qty").value = Math.min(10, +$("#pd-qty").value + 1));
+$("#pd-plus").onclick = () => ($("#pd-qty").value = Math.min(maxQty(current), +$("#pd-qty").value + 1));
 $("#pd-add").onclick = () => { addToCart(current.id, +$("#pd-qty").value); $("#product-dlg").close(); };
 $("#cart-btn").onclick = () => { renderCart(); $("#cart-dlg").showModal(); };
 $("#cart-lines").addEventListener("click", (e) => {
   const t = e.target.closest("button");
   if (!t) return;
   const { inc, dec, rm } = t.dataset;
-  if (inc) cart[inc] = Math.min(cart[inc] + 1, 10);
+  if (inc) cart[inc] = Math.min(cart[inc] + 1, maxQty(byId[inc]));
   if (dec) cart[dec] > 1 ? cart[dec]-- : delete cart[dec];
   if (rm) delete cart[rm];
   saveCart();

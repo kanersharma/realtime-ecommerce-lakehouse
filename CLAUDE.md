@@ -5,7 +5,9 @@ Context for AI coding assistants working on this repository. Read this before ch
 ## What this is
 A local, Docker Compose–based **streaming lakehouse** project:
 `Lakeshop storefront (FastAPI + bento UI) → Kafka → Flink SQL → Apache Iceberg (REST catalog, S3 on RustFS) → Trino → Streamlit`.
-An optional simulator (`generator/`) can add background traffic.
+An optional simulator (`generator/`) can add background traffic. The shop also owns product **stock**
+(SQLite); every stock movement streams to Iceberg, and the dashboard's 📦 Inventory tab forecasts demand
+and suggests reorders.
 It has two goals: be easy to run (`docker compose up -d --build`) and show senior-level data
 engineering (event time, watermarks, exactly-once, table maintenance, time travel).
 
@@ -14,7 +16,7 @@ engineering (event time, watermarks, exactly-once, table maintenance, time trave
 |---|---|
 | [docs/ai/PRD.md](docs/ai/PRD.md) | you need the *why*: users, goals, requirements (S-/P-/D-/X- ids) |
 | [docs/ai/Architecture.md](docs/ai/Architecture.md) | you touch interfaces: event contract, API, Flink job, tables, failure modes |
-| [docs/ai/Rules.md](docs/ai/Rules.md) | **always**: the full rulebook (R-TEST, R-EVT, R-SHOP, R-SQL, R-UI, R-OPS, R-GIT) |
+| [docs/ai/Rules.md](docs/ai/Rules.md) | **always**: the full rulebook (R-TEST, R-EVT, R-SHOP, R-CAT, R-INV, R-FLINK, R-SQL, R-UI, R-OPS, R-GIT) |
 | [docs/ai/Design.md](docs/ai/Design.md) | you touch UI: tokens, category colours, components, bento grid |
 | [docs/ai/Phases.md](docs/ai/Phases.md) | you plan work: what's delivered, roadmap with acceptance criteria |
 | [docs/ai/Memory.md](docs/ai/Memory.md) | something looks odd: past incidents, decisions, owner preferences |
@@ -32,19 +34,22 @@ end to end before making the final change (commit, push, or saying "done").** Co
    | `test_catalog.py` | catalog integrity; the 6 categories stay in sync across catalog, dashboard and shop UI |
    | `test_contract.py` | shop and simulator events have exactly the columns in `pipeline.sql` |
    | `test_shop_api.py` | every endpoint and payment method (card/UPI/COD), validation, price tampering, no card-data leaks |
-   | `test_catalog_api.py` | add/list/validate/persist/delete products, reviews rules; a new product can be bought |
+   | `test_catalog_api.py` | add/list/validate/persist/delete products, reviews rules; a new product can be bought; ids never reused |
+   | `test_inventory_api.py` | stock: checkout takes it, 409 when short (no events), restock/settings, ledger, migration, no-oversell race |
+   | `test_inventory_plan.py` | forecast + reorder math in `dashboard/inventory.py`, SQL builders and their injection guard |
    | `test_generator.py` | simulator funnel logic |
-   | `test_dashboard.py` | dashboard via Streamlit `AppTest` with a fake Trino: KPIs, themes, waiting state, SQL guard |
-   | `test_storefront_e2e.py` | real browser (Playwright + Edge): search, cart, all checkouts, server-down message, layout, catalog admin (add → view → buy, validation, delete) |
-   | `test_integration.py` | running stack: real orders (including an admin-added product) land in Iceberg; dashboard SQL runs on real Trino |
+   | `test_dashboard.py` | dashboard via Streamlit `AppTest` with a fake Trino: KPIs, themes, waiting state, SQL guard, Inventory tab (plan, Restock button, product picker) |
+   | `test_storefront_e2e.py` | real browser (Playwright + Edge): search, cart, all checkouts, server-down message, layout, catalog admin (add → view → buy, validation, delete), stock limits and sold-out, non-secure context |
+   | `test_integration.py` | running stack: real orders (including an admin-added product) land in Iceberg; dashboard SQL runs on real Trino; lakehouse stock matches the shop |
 2. **Run the whole suite**, not just the file you touched:
    ```bash
    python -m venv .venv && .venv/Scripts/python -m pip install -r requirements-dev.txt   # once
    .venv/Scripts/python -m pytest -rs
+   docker compose build tests && docker compose run --rm tests   # the same suite in the toolbox (Linux + Chromium)
    ```
    Everything must pass. A failing test is fixed or explained to the owner, never deleted to go green.
 3. **Integration tests must RUN, not skip**, for any change touching the shop, events, pipeline,
-   catalog, Trino config or docker-compose: `docker compose up -d --build`, wait for the Flink job
+   catalog, inventory, Trino config or docker-compose: `docker compose up -d --build`, wait for the Flink job
    (`curl -s localhost:8081/jobs/overview` → RUNNING), then run pytest again. A skip in
    `test_integration.py` means the pipeline was **not** verified, so say so explicitly.
 4. **Look at UI changes in a real browser** (store :8000, dashboard :8501, light and dark), including
@@ -56,10 +61,10 @@ end to end before making the final change (commit, push, or saying "done").** Co
 | Service | Image | Port (host→container) | Notes |
 |---|---|---|---|
 | kafka | apache/kafka:3.9.0 | 29092 (host listener) | KRaft single node. In-network address: `kafka:9092` |
-| kafka-init | apache/kafka:3.9.0 | – | one-shot: creates topics `clicks`, `orders` (3 partitions) |
+| kafka-init | apache/kafka:3.9.0 | – | one-shot: creates topics `clicks`, `orders`, `inventory` (3 partitions) |
 | kafka-ui | kafbat/kafka-ui:v1.1.0 | 8088→8080 | optional, ~300 MB RAM |
-| shop | ./shop | 8000 | Lakeshop storefront, catalog admin (`/admin.html`) and API; produces to `clicks` / `orders`. Catalog in SQLite at `SHOP_DB=/data/shop.db` (volume `shop-data`). `KAFKA_BOOTSTRAP` unset = dry run (prints events) |
-| generator | ./generator | – | **opt-in**: `--profile simulator`; env `SESSIONS_PER_SEC` (default 20) |
+| shop | ./shop | 8000 | Lakeshop storefront, catalog admin (`/admin.html`) and API; produces to `clicks` / `orders` / `inventory`. Catalog **and stock** in SQLite at `SHOP_DB=/data/shop.db` (volume `shop-data`). `KAFKA_BOOTSTRAP` unset = dry run (prints events) |
+| generator | ./generator | – | **opt-in**: `--profile simulator`; env `SESSIONS_PER_SEC` (default 20); orders go through the shop's checkout (`SHOP_URL`) |
 | rustfs | rustfs/rustfs:1.0.0 | 9000 (S3), 9001 (console) | creds `admin` / `password` |
 | s3-init | amazon/aws-cli | – | one-shot: creates bucket `warehouse` |
 | postgres | postgres:16.4-alpine | – | database behind the Iceberg catalog (volume `catalog-db`) |
@@ -67,13 +72,14 @@ end to end before making the final change (commit, push, or saying "done").** Co
 | jobmanager / taskmanager | ./flink (lakehouse-flink:1.20) | 8081 | config via `FLINK_PROPERTIES` in the `x-flink` anchor |
 | flink-job | ./flink | – | one-shot: submits `pipeline.sql` via `sql-client.sh`, **skips if a job is already running**, exits 0 |
 | trino | trinodb/trino:470 | **8090**→8080 | catalog from `trino/catalog/lakehouse.properties`; heap pinned in `trino/jvm.config` |
-| dashboard | ./dashboard | 8501 | Streamlit, talks to `trino:8080` |
+| dashboard | ./dashboard | 8501 | Streamlit, talks to `trino:8080`; Restock buttons call `SHOP_URL`; `DEMO_DAY_SECONDS` (60) |
+| tests / demo | `.` (root `Dockerfile`, image `lakehouse-tools`) | – | **profile `tools`**, on demand: `docker compose run --rm tests` (whole suite) / `demo` (traffic + screenshots). Code is baked in: `docker compose build tests` after changes |
 
 The catalog name `lakehouse` and schema `shop` are the same in Flink and Trino. Keep them in sync.
 
 ## Key files
 - `flink/sql/pipeline.sql`: **the pipeline.** Kafka source DDL (temporary tables), Iceberg catalog,
-  table DDL (`IF NOT EXISTS`), and one `EXECUTE STATEMENT SET` with 4 INSERTs.
+  table DDL (`IF NOT EXISTS`), and one `EXECUTE STATEMENT SET` with 5 INSERTs.
 - `flink/Dockerfile`: connector jars added via `ADD` from Maven Central. **Versions are coupled**:
   `flink-sql-connector-kafka-<ver>-1.20`, `iceberg-flink-runtime-1.20-<iceberg>`, and
   `iceberg-aws-bundle-<iceberg>` must match the Flink minor (1.20) and each other.
@@ -84,13 +90,20 @@ The catalog name `lakehouse` and schema `shop` are the same in Flink and Trino. 
   seeds its SQLite database from it (`INSERT OR IGNORE`); the live catalog, including admin-added
   products, is `GET /api/products`, which the simulator also reads. Keep the six categories in sync with
   `CATEGORY_COLORS` (dashboard), `CATS` (`shop/static/common.js`) and `CATEGORIES`/`EMOJI` (`shop/main.py`).
-- `shop/main.py`: catalog store (`db()`, `catalog()`, `product()`, `create_product()`, `delete_product()`),
-  pure functions `authorize`, `click_event`, `order_events`, and the FastAPI routes. `shop/static/`:
+- `shop/main.py`: catalog and stock store (`connect()`, `transaction()` = `BEGIN IMMEDIATE`, `catalog()`,
+  `product()`, `create_product()`, `delete_product()`, `reserve_stock()`, `restock()`,
+  `set_inventory_settings()`, `snapshot_stock()`), pure functions `authorize`, `click_event`,
+  `order_events`, `inventory_event`, and the FastAPI routes. `shop/static/`:
   no-build UIs: store (`index.html`, `app.js`), catalog admin (`admin.html`, `admin.js`), shared
   helpers (`common.js`), `styles.css`.
 - `generator/generator.py`: `session_events(now, rng)` is pure and tested; `main()` does Kafka I/O.
 - `tests/`: the whole test suite (pytest; config in `pytest.ini`, deps in `requirements-dev.txt`).
 - `dashboard/app.py`: all SQL is in module-level constants; `query(sql) -> (DataFrame, ms)`.
+- `dashboard/inventory.py`: the Inventory tab's logic, kept out of Streamlit so it's unit-testable:
+  `plan()` (forecast, safety stock, reorder point, suggestion, status), `inventory_sql()` and
+  `daily_sales_sql()` (validates the product id).
+- `Dockerfile` (root) + `.dockerignore`: the toolbox image for tests and the demo.
+- `scripts/demo.py`: shopper traffic + screenshots (`docker compose run --rm demo`).
 
 ## Commands
 ```bash
@@ -102,6 +115,8 @@ docker compose run --rm flink-job             # submit pipeline.sql (no-op if a 
 docker compose exec trino trino --catalog lakehouse --schema shop   # SQL shell
 .venv/Scripts/python -m pytest -rs           # ALL tests (see "Testing is mandatory" above)
 .venv/Scripts/python -m pytest -m "not e2e"   # fast loop while iterating (still run everything before done)
+docker compose run --rm tests                 # the whole suite with only Docker (rebuild: docker compose build tests)
+docker compose run --rm demo                  # shopper traffic + screenshots into docs/screenshots/
 cd shop && uvicorn main:app --port 8000       # UI without Docker: events are printed (dry run)
 docker compose --profile simulator up -d      # add simulated background traffic
 curl -s localhost:8081/jobs/overview          # Flink job state
@@ -116,13 +131,15 @@ To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
    A growing `restored` count means the job is crash-looping. Read `/jobs/<jid>/exceptions`.
 3. In Trino: `SELECT count(*), max(event_time) FROM orders` grows, and `max(event_time)` is within ~15 s of now (UTC).
 4. The dashboard at :8501 shows KPIs (and the revenue chart after ~65 s).
+5. Stock: `SELECT product_id, on_hand_after FROM inventory_movements ORDER BY event_time DESC, seq DESC`
+   matches `GET /api/products` (`on_hand`) within ~10 s.
 
 ## Conventions
 - All timestamps are **UTC, timezone-naive** `TIMESTAMP(3)`. The generator emits
   `yyyy-MM-dd HH:mm:ss.SSS` (Flink JSON `SQL` format); the dashboard sets the Trino session to UTC,
   so `localtimestamp` is "now in UTC". Don't introduce `TIMESTAMP_LTZ` or `Z` suffixes without changing all three.
 - **Event contract**: shop and generator emit exactly the columns declared in `pipeline.sql`
-  (`clicks_src`, `orders_src`). Adding a field means changing all three plus the Iceberg DDL.
+  (`clicks_src`, `orders_src`, `inventory_src`). Adding a field means changing all three plus the Iceberg DDL.
   One order event per cart line: `orders` has one product per row.
 - **The shop server owns money and identity**: prices, totals, order ids and `event_time` are set in
   `main.py` from the catalog, never taken from the browser. Validate every request with pydantic models.
@@ -131,8 +148,11 @@ To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
 - Flink DDL must stay idempotent (`CREATE ... IF NOT EXISTS`).
 - Gold tables must stay **append-only** (window TVF aggregations). A regular `GROUP BY` without
   windows produces updates and would need an upsert-enabled Iceberg v2 table with a primary key.
-- The dashboard is read-only, apart from the explicit OPTIMIZE button. The SQL playground only allows
-  `SELECT/WITH/SHOW/DESCRIBE/EXPLAIN`.
+- **The shop is the system of record for stock** (Rules R-INV): read-modify-write inside
+  `transaction()`, never negative, a short checkout is refused whole with 409 and emits nothing, a
+  ledger row per change, events published after commit. Product ids are never reused.
+- The dashboard is read-only, apart from the explicit OPTIMIZE button and the Restock buttons (which
+  call the shop's API). The SQL playground only allows `SELECT/WITH/SHOW/DESCRIBE/EXPLAIN`.
 - **UI style is neo-brutalist**: base colors in `dashboard/.streamlit/config.toml`, borders, shadows and
   fonts in the `CSS` constant at the top of `app.py`. Put charts inside `with card(title, tag):` and render
   them with `draw(altair_chart)` so they share styling. `CATEGORY_COLORS` is a fixed, colorblind-validated
@@ -175,7 +195,17 @@ To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
 - Flink's first checkpoint can fail with `UnknownHostException` if containers start in the wrong order.
   The fixed-delay restart strategy recovers on its own.
 - Docker Desktop with < 6 GB of memory freezes (API returns 500). Check `docker stats` first.
+- **`crypto.randomUUID` exists only in secure contexts** (https, localhost). Over `http://shop:8000` or a
+  LAN IP it's undefined, and the store rendered blank. `app.js` uses `crypto.getRandomValues`.
+- **The toolbox base must stay `python:3.12-slim-bookworm`**: Playwright 1.49's `install --with-deps`
+  fails on Debian 13.
+- **Tests must never touch `shop/data/shop.db`** (the developer database). The e2e server uses a temp
+  `SHOP_DB`; the session guard `developer_db_untouched` fails the run if it changes.
+- **Streamlit resets a select when its options change.** Keep option lists in a stable order (the
+  Inventory product picker is alphabetical, seeded via `st.session_state`), or auto-refresh throws the
+  user's choice away.
 
 ## Ideas that fit the architecture
 Schema Registry + Avro; Flink CDC upsert table; late-event side output; scheduled Iceberg maintenance
-(`expire_snapshots`, `remove_orphan_files`); Postgres-backed catalog; data-quality checks on gold tables.
+(`expire_snapshots`, `remove_orphan_files`); stock in transit and a transactional outbox for inventory
+events; data-quality checks on gold tables.

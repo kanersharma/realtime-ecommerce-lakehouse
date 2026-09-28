@@ -27,6 +27,31 @@ def test_shop_order_event_matches_orders_src():
     assert set(e) == source_columns("orders_src")
 
 
+def test_shop_inventory_event_matches_inventory_src():
+    p = shop.product("P001")
+    m = {"seq": 1, "reason": "order", "delta": -1, "on_hand_after": 10, "at": shop.ts(AT)}
+    topic, key, e = shop.inventory_event(p, m)
+    assert (topic, key) == ("inventory", "P001")
+    assert set(e) == source_columns("inventory_src")
+
+
+def test_every_stock_change_emits_contract_shaped_events():
+    """restock, settings, add, order, delete and snapshot all produce the same schema."""
+    events = []
+    p, ev = shop.create_product(shop.NewProduct(name="Contract Probe", category="Home", price=3.5, emoji="☕",
+                                                description="Checks the inventory event contract.", stock=5), AT)
+    events += ev
+    events += shop.restock("P001", 3, AT)[1]
+    events += shop.set_inventory_settings("P001", shop.InventorySettings(lead_time_days=4, target_cover_days=9), AT)[1]
+    events += shop.reserve_stock(shop.Checkout(user_id="W-contract", session_id="S-contract", name="C", country="IN",
+                                               items=[shop.Line(product_id="P001", quantity=1)],
+                                               payment=shop.Payment(method="cod")), AT)
+    events += shop.snapshot_stock(AT)
+    events += shop.delete_product(p["id"], AT)
+    assert {r["reason"] for _, _, r in events} == {"initial", "restock", "settings", "order", "snapshot", "removed"}
+    assert all(set(e) == source_columns("inventory_src") for _, _, e in events)
+
+
 def test_simulator_events_match_pipeline():
     seen = {"clicks": set(), "orders": set()}
     rng = random.Random(1)

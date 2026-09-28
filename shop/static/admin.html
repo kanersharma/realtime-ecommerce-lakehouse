@@ -38,6 +38,11 @@
         <p class="big" id="st-avg">–</p>
         <p class="muted" id="st-range"></p>
       </article>
+      <article class="tile stat-stock">
+        <span class="pill">📦 STOCK</span>
+        <p class="big" id="st-units">–</p>
+        <p class="muted" id="st-stock-split"></p>
+      </article>
       <article class="tile stat-new">
         <span class="pill">✨ NEWEST</span>
         <p class="big" id="st-new-emoji">–</p>
@@ -55,7 +60,7 @@
         <thead>
           <tr>
             <th><span class="sr-only">Photo</span></th><th>ID</th><th>Product</th><th>Category</th>
-            <th class="num">Price</th><th>Badge</th><th>Rating</th><th>Source</th><th><span class="sr-only">Actions</span></th>
+            <th class="num">Price</th><th class="num">Stock</th><th>Badge</th><th>Rating</th><th>Source</th><th><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
@@ -90,7 +95,17 @@
           <div class="emoji-grid" id="emoji-grid" role="radiogroup" aria-label="Product emoji"></div>
         </fieldset>
         <fieldset>
-          <legend>3 · Reviews <span class="muted small-note">optional</span></legend>
+          <legend>3 · Inventory</legend>
+          <label>Starting stock <input name="stock" type="number" inputmode="numeric" step="1" min="0" max="10000"></label>
+          <div class="row">
+            <label>Lead time (days) <input name="lead_time_days" type="number" inputmode="numeric" step="1" min="1" max="60"></label>
+            <label>Target cover (days) <input name="target_cover_days" type="number" inputmode="numeric" step="1" min="1" max="90"></label>
+          </div>
+          <p class="muted small-note">Lead time: how long a refill takes to arrive. Target cover: how many days
+            of demand a refill should last. The dashboard's reorder suggestions use both.</p>
+        </fieldset>
+        <fieldset>
+          <legend>4 · Reviews <span class="muted small-note">optional</span></legend>
           <div class="row">
             <label>Rating (1–5) <input name="rating" type="number" inputmode="decimal" step="0.1" min="1" max="5" placeholder="4.5"></label>
             <label>Number of reviews <input name="reviews" type="number" inputmode="numeric" step="1" min="0" max="100000" placeholder="0"></label>
@@ -131,6 +146,36 @@
       </fieldset>
       <p class="error" id="rev-error" role="alert" hidden></p>
       <button class="btn btn-pink wide" type="submit" id="rev-save">Save reviews</button>
+    </form>
+  </dialog>
+
+  <!-- Stock of any product: restock + reorder settings -->
+  <dialog id="stock-dlg" class="modal small-modal" aria-labelledby="stock-title">
+    <form method="dialog"><button class="close" aria-label="Close">✕</button></form>
+    <form id="stock-form" class="checkout" novalidate>
+      <h2 id="stock-title">Stock</h2>
+      <p class="muted" id="stock-product"></p>
+      <p class="big stock-now"><span id="stock-now">0</span> <span class="small-note muted">units on hand</span></p>
+      <fieldset>
+        <legend>Restock</legend>
+        <label>Add units <input name="quantity" type="number" inputmode="numeric" step="1" min="0" max="10000" placeholder="0"></label>
+        <div class="row">
+          <button type="button" class="btn small" data-plus="10">+10</button>
+          <button type="button" class="btn small" data-plus="50">+50</button>
+          <button type="button" class="btn small" data-plus="100">+100</button>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Reorder settings</legend>
+        <div class="row">
+            <label>Lead time (days) <input name="lead_time_days" type="number" inputmode="numeric" step="1" min="1" max="60"></label>
+            <label>Target cover (days) <input name="target_cover_days" type="number" inputmode="numeric" step="1" min="1" max="90"></label>
+          </div>
+          <p class="muted small-note">Lead time: how long a refill takes to arrive. Target cover: how many days
+            of demand a refill should last. The dashboard's reorder suggestions use both.</p>
+      </fieldset>
+      <p class="error" id="stock-error" role="alert" hidden></p>
+      <button class="btn btn-pink wide" type="submit" id="stock-save">Save</button>
     </form>
   </dialog>
 

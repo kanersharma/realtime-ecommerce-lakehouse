@@ -76,7 +76,8 @@ def test_new_product_can_be_bought_and_emits_its_own_data(client, events):
                                            "items": [{"product_id": pid, "quantity": 3}],
                                            "payment": {"method": "cod"}})
     assert r.status_code == 200 and r.json()["total"] == 149.97
-    (_, _, click), (_, _, order) = events
+    (click,) = [e for topic, _, e in events if topic == "clicks"]
+    (order,) = [e for topic, _, e in events if topic == "orders"]
     assert click["product_id"] == pid and click["category"] == "Electronics"
     assert (order["product_name"], order["unit_price"], order["total_amount"]) == ("Game Controller", 49.99, 149.97)
 
@@ -96,11 +97,14 @@ def test_seed_products_cannot_be_deleted(client):
     assert client.delete("/api/products/P999").status_code == 404
 
 
-def test_deleted_id_is_not_reused_while_later_ids_exist(client):
+def test_deleted_ids_are_never_reused(client):
+    """The lakehouse keys history by product_id: a reused id would inherit another product's sales."""
     first, second = add(client).json()["id"], add(client, name="Retro Handheld", emoji="🕹️").json()["id"]
+    assert (first, second) == ("P049", "P050")
     client.delete(f"/api/products/{first}")
     assert add(client, name="Studio Mic", emoji="🎙️").json()["id"] == "P051"
-    assert second == "P050"
+    client.delete("/api/products/P051")                              # even the highest id
+    assert add(client, name="Pocket Radio", emoji="🔊").json()["id"] == "P052"
 
 
 # ------------------------------------------------ reviews

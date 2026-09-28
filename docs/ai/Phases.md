@@ -14,7 +14,8 @@
 | 5 | Test suite and testing rule | `fcac497` | 2026-09-28 |
 | 6 | Screenshots, demo guide, real-data fixes | `5b283ea` | 2026-09-28 |
 | 7 | AI reference docs (this folder) | `b6fee8a` | 2026-09-28 |
-| 8 | Catalog management | see `git log` | 2026-09-28 |
+| 8 | Catalog management, reviews, Postgres catalog | `4a03290`, `47591c5` | 2026-09-28 |
+| 9 | Inventory and demand forecasting; Docker toolbox | see `git log` | 2026-09-28 |
 
 ### Phase 1: Streaming lakehouse core
 Kafka → Flink SQL → Iceberg (REST catalog) → Trino → Streamlit, plus a Python simulator.
@@ -62,63 +63,52 @@ PRD, Architecture, Rules, Design, Phases and Memory in `docs/ai/`, indexed from 
   a crash loop from `SQLITE_BUSY_SNAPSHOT`. The revenue chart shows still-open minutes live from bronze,
   so single orders appear in a quiet store.
 
+### Phase 9: Inventory and demand forecasting
+Decisions by the owner: orders beyond stock are **rejected** (no back-orders), the forecast is
+**EWMA + linear trend**, and the Docker work is a **toolbox image** for tests and demo.
+
+- **Shop = system of record for stock.** `products` gained `on_hand`, `lead_time_days`,
+  `target_cover_days` (existing databases migrate in place; seed products get 15–74 units, admin-added
+  ones 50). A `stock_movements` ledger records every change with a global `seq`.
+- **Checkout reserves stock atomically** (`BEGIN IMMEDIATE`, all lines or none). Short stock gives 409
+  ("Only N left of X" / "X is sold out") and emits nothing. A 25-thread race test proves no overselling.
+- **Restock / settings API** (`POST …/restock`, `PUT …/inventory`), a startup **snapshot** of all stock
+  (re-syncs the lakehouse), and a `removed` movement on delete.
+- **New Kafka topic `inventory`** → Flink → bronze `lakehouse.shop.inventory_movements` (no gold: the
+  forecast needs zero-filled daily series, computed in Trino from bronze orders).
+- **Store:** "Only N left" (≤ 5), SOLD OUT tiles with disabled buttons, quantities capped at stock,
+  stock refreshed after every checkout attempt.
+- **Admin:** Stock column and stats tile, a 📦 dialog for every product (restock with +10/+50/+100,
+  lead time, target cover), and a "3 · Inventory" section when adding products.
+- **Dashboard 📦 Inventory tab:** KPIs, reorder suggestions with one-click **Restock** (calls the shop),
+  days-of-cover chart (lead-time ticks), per-product demand + dashed forecast, and a full table. The math
+  lives in `dashboard/inventory.py` (pure, unit-tested). One demo day = `DEMO_DAY_SECONDS` (60 s).
+- **Simulator** orders now go through the shop checkout, so simulated sales also consume stock.
+- **Docker toolbox:** a root `Dockerfile` (Python + Chromium) with compose services `tests` and `demo`,
+  so anyone can run the full suite and the demo with only Docker.
+- **Found on the way** (details in Memory.md): product ids reused after deletes, sold-out products
+  without a suggestion, e2e tests writing to the developer database, a blank store over plain http
+  (`crypto.randomUUID`), and the toolbox base on Debian 13. Reviewing the screenshots found a product
+  picker that reset on every refresh, a tab that looked faded ~40 % of the time during auto-refresh,
+  add-dialog sections numbered 1, 2, 4, 3, crowded axis labels, and two screenshots that never
+  scrolled to the products.
+- Tests: `test_inventory_api.py`, `test_inventory_plan.py`, and inventory cases in the dashboard, e2e,
+  contract, generator and integration suites (217 tests in total).
+
 ## 2. Roadmap (not started)
 Ordered roughly by value. Each item lists acceptance criteria; per R-TEST, every item
 also ships with tests.
 
-### 2.0 NEXT: Inventory and demand forecasting *(Phase 9, agreed with the owner)*
-**Goal:** every product has stock. Orders reduce it, restocks increase it, and an inventory dashboard
-uses sales trends to forecast demand and **suggest when and how much to reorder**, based on how many
-days a refill takes (lead time) and how many days of stock we want to hold.
-
-**Operational side (shop, source of truth for stock)**
-- Add `on_hand`, `lead_time_days` (days a refill takes to arrive) and `target_cover_days` (days of
-  demand to keep in stock) to the shop's `products` table. Seed products get starting stock.
-- Checkout **reserves stock atomically** (`BEGIN IMMEDIATE`, check then decrement all lines, or none).
-  Insufficient stock gives 409 and a clear message. The store shows "Only N left" and "Sold out" (the
-  add button is disabled).
-- The admin gets a **Restock** action per product (quantity, optional lead-time override), a stock
-  column with status chips (In stock / Low / Out), and the "+ Add product" dialog gains starting stock.
-
-**Event and lakehouse side**
-- A new Kafka topic `inventory` (key = `product_id`) carrying movements:
-  `movement_id, product_id, category, delta, reason (order | restock | adjustment), on_hand_after,
-  lead_time_days, event_time`. The event contract is extended per R-EVT-2 (producers, `pipeline.sql`,
-  tests, Architecture §4).
-- Flink writes bronze `inventory_movements` and a gold `sales_per_bucket` (units sold per product per
-  time bucket) with window TVFs, so it stays append-only (R-FLINK-2).
-- Current stock in Trino is the latest `on_hand_after` per product (`max_by(on_hand_after, event_time)`).
-
-**Inventory dashboard (new tab "📦 Inventory")**
-- KPIs: products low or out of stock, stock value, units sold (last bucket window), and the number of
-  products that need reordering now.
-- Per product: on hand, **sales velocity** (exponentially weighted average of units per bucket), a
-  **trend** (slope via Trino `regr_slope`), and a **forecast** of demand over the lead time.
-- **Days of cover** = on_hand ÷ forecast daily demand.
-- **Reorder point** = forecast demand × lead_time_days + safety stock, with
-  safety stock = z × σ(demand) × √lead_time_days (z ≈ 1.65 for about a 95 % service level).
-- **Suggested order quantity** = max(0, forecast demand × (lead_time_days + target_cover_days)
-  + safety stock − on_hand).
-- Charts: sales over time with a dashed forecast line per product, and a "days of cover" bar list
-  sorted from most urgent. A table of suggestions has one-click **Restock suggested qty** (calls the shop API).
-- **Demo time scaling:** real "days" are too slow for a live demo, so a setting `DEMO_DAY_SECONDS`
-  (e.g. 60 s = 1 simulated day) makes buckets, lead times and forecasts move visibly within minutes.
-  All formulas work in "days" and only the bucket size changes.
-
-**Acceptance criteria**
-- Buying the last unit sets `on_hand` to 0. The store shows "Sold out" and checkout returns 409 without
-  emitting orders. Restocking brings the product back.
-- Concurrent checkouts never oversell (an API test with parallel requests).
-- Every movement appears in `inventory_movements`, and Trino's current stock equals the shop's
-  `on_hand` for every product (integration test).
-- Driving steady simulated demand makes days of cover fall and a reorder suggestion appear before
-  stock hits 0. Accepting it restocks, and the suggestion clears.
-- Dashboard queries pass `test_dashboard_queries_run_on_real_trino`; UI checked in light, dark and mobile.
-
-**Open design choices to confirm before building**
-- Forecast method: EWMA plus linear trend (simple and explainable), or Holt's double exponential
-  smoothing.
-- Whether an order that exceeds stock should be rejected or back-ordered. (Proposal: rejected.)
+### 2.0 Inventory follow-ups
+- **Supplier lead times in real time:** model an order that's *in transit* (placed but not yet
+  received), so a restock arrives after its lead time instead of instantly, and the reorder point
+  accounts for stock on order.
+- **Transactional outbox** for inventory events (exactly-once between the shop DB and Kafka; today the
+  startup snapshot re-syncs after a crash between commit and publish).
+- **Stockout-aware forecasting:** exclude sold-out days from the demand series instead of the current
+  "at least the plain average" correction.
+- **Intermittent demand:** Croston / SBA for lumpy, low-volume products. The normal-approximation safety
+  stock (1.65·σ·√L) is high for them, so a product can show "Reorder now" with weeks of cover.
 
 ### 2.1 CI on GitHub Actions *(high value, low effort)*
 - A workflow runs the unit, contract, API, dashboard and e2e suites on every push/PR (Playwright
