@@ -1,6 +1,6 @@
 # 🎬 Demo guide
 
-A 10-minute walkthrough for showing the project to someone: an interviewer, a team, or yourself.
+A 10-minute walkthrough for showing the project to someone: a team, a meetup, or yourself.
 You shop in a real store, and seconds later the purchase shows up in a lakehouse dashboard.
 
 ## Before the demo (5 minutes)

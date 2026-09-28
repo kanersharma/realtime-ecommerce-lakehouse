@@ -268,7 +268,7 @@ ALTER TABLE orders EXECUTE optimize;
 │   └── app.py                  # Streamlit app
 ├── tests/                      # pytest suite: unit, contract, API, dashboard, browser e2e, integration
 ├── scripts/demo.py             # send shopper traffic through the store + capture screenshots
-├── docs/                       # DEMO.md walkthrough + screenshots/
+├── docs/                       # DEMO.md walkthrough, screenshots/, ai/ (PRD, Architecture, Rules, Design, Phases, Memory)
 ├── requirements-dev.txt        # test tooling
 ├── CLAUDE.md                   # context for AI coding assistants (incl. the mandatory testing workflow)
 └── README.md

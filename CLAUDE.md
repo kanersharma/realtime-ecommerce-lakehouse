@@ -3,11 +3,23 @@
 Context for AI coding assistants working on this repository. Read this before changing anything.
 
 ## What this is
-A local, Docker Compose–based **streaming lakehouse** portfolio project:
+A local, Docker Compose–based **streaming lakehouse** project:
 `Lakeshop storefront (FastAPI + bento UI) → Kafka → Flink SQL → Apache Iceberg (REST catalog, S3 on RustFS) → Trino → Streamlit`.
 An optional simulator (`generator/`) can add background traffic.
 It has two goals: be easy to run (`docker compose up -d --build`) and show senior-level data
 engineering (event time, watermarks, exactly-once, table maintenance, time travel).
+
+## 📚 Reference docs: read what's relevant before changing things
+| Doc | Read it when… |
+|---|---|
+| [docs/ai/PRD.md](docs/ai/PRD.md) | you need the *why*: users, goals, requirements (S-/P-/D-/X- ids) |
+| [docs/ai/Architecture.md](docs/ai/Architecture.md) | you touch interfaces: event contract, API, Flink job, tables, failure modes |
+| [docs/ai/Rules.md](docs/ai/Rules.md) | **always**: the full rulebook (R-TEST, R-EVT, R-SHOP, R-SQL, R-UI, R-OPS, R-GIT) |
+| [docs/ai/Design.md](docs/ai/Design.md) | you touch UI: tokens, category colours, components, bento grid |
+| [docs/ai/Phases.md](docs/ai/Phases.md) | you plan work: what's delivered, roadmap with acceptance criteria |
+| [docs/ai/Memory.md](docs/ai/Memory.md) | something looks odd: past incidents, decisions, owner preferences |
+
+When behaviour changes, update the matching doc in the same change (R-GIT-3), and append lessons to Memory.md.
 
 ## ⚠️ Testing is mandatory: every create or update, before calling it done
 The owner's standing rule: **whenever anything is created or changed, run the tests and verify it works
