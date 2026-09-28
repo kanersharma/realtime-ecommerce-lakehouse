@@ -71,6 +71,10 @@ To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
   fonts in the `CSS` constant at the top of `app.py`. Put charts inside `with card(title, tag):` and render
   them with `draw(altair_chart)` so they share styling. `CATEGORY_COLORS` is a fixed, colorblind-validated
   mapping, so don't let colors cycle by position.
+- **Dark mode** is a sidebar toggle persisted as `?theme=dark` in the URL. Colors that flip live in `MODES`
+  and reach the CSS as variables (`var(--ink)`, `var(--card)`, …), so never hardcode black or white in new
+  CSS. Charts read `M["ink"]` / `M["grid"]` and `CATS` (the per-mode category colors). Bright fills (hero,
+  KPI tiles) always use `TILE_INK` text. Data grids are canvas-drawn, so dark mode inverts them with a CSS filter.
 - Deliberate shortcuts are marked with `ponytail:` comments that name the limit and the upgrade path.
 - Keep the stack under ~5 GB RAM (see memory settings in compose). Many users run it on 8–16 GB laptops.
 
@@ -90,6 +94,8 @@ To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
 - **Streamlit upgrades can break the styling**: the CSS targets `data-testid` attributes
   (`stMetric`, `stColumn`, `stVerticalBlockBorderWrapper`, …), which Streamlit renames between versions.
   After bumping `streamlit` in `requirements.txt`, open the dashboard and check the cards, tabs and KPI tiles.
+- **`st.code` / ```` ```sql ```` fences show `[object Object]`** after a fragment re-run (Streamlit 1.41
+  syntax-highlighter bug). Use the `code()` helper in `app.py`, which renders a plain fence without a language.
 - **Port 8080** is commonly taken (Airflow), so Trino is published on 8090.
 - Flink's first checkpoint can fail with `UnknownHostException` if containers start in the wrong order.
   The fixed-delay restart strategy recovers on its own.

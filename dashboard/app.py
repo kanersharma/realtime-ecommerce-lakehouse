@@ -24,83 +24,125 @@ LINKS = {
 
 st.set_page_config(page_title="Real-time Lakehouse", page_icon="⚡", layout="wide")
 
-# ---------------------------------------------------------------- neo-brutalist look
-# Base colors live in .streamlit/config.toml; this adds the borders, hard shadows and type.
-INK, PAPER, YELLOW, PINK, BLUE = "#111111", "#FFFBEF", "#FFD23F", "#FF6FB5", "#2F6BFF"
-# Fixed category -> color, so a category keeps its color whatever the data holds.
-# Validated for the PAPER surface with the dataviz palette validator (CVD + contrast checks).
-CATEGORY_COLORS = {
-    "Beauty": "#E83E8C", "Books": "#8A5A00", "Electronics": "#2F6BFF",
-    "Fashion": "#E8700A", "Home": "#128A5E", "Sports": "#5FB7FF",
-}
+# ---------------------------------------------------------------- neo-brutalist look (light + dark)
+# Base theme lives in .streamlit/config.toml; this adds borders, hard shadows, type and dark mode.
+YELLOW, PINK, BLUE = "#FFD23F", "#FF6FB5", "#2F6BFF"
+TILE_INK = "#111111"  # text on bright fills (hero, KPI tiles, pink buttons) stays dark in both modes
 KPI_COLORS = [YELLOW, PINK, "#7CE0C3", "#A9C4FF", "#FFB27A"]
+# Colors that flip with the theme.
+MODES = {
+    "light": {"paper": "#FFFBEF", "card": "#FFFFFF", "field": "#FFF1C1", "side": "#FFF1C1",
+              "ink": "#111111", "grid": "#1111111A"},
+    "dark":  {"paper": "#15130F", "card": "#22201B", "field": "#2E2A22", "side": "#1C1A16",
+              "ink": "#FFFBEF", "grid": "#FFFBEF1F"},
+}
+# Fixed category -> color, so a category keeps its color whatever the data holds. Same hues in both
+# modes, stepped for each card surface; both validated with the dataviz palette validator
+# (adjacent pairs in stack order: lightness band, chroma, CVD separation, contrast).
+CATEGORY_COLORS = {
+    "light": {"Beauty": "#E83E8C", "Books": "#8A5A00", "Electronics": "#2F6BFF",
+              "Fashion": "#E8700A", "Home": "#128A5E", "Sports": "#5FB7FF"},
+    "dark":  {"Beauty": "#E83E8C", "Books": "#A87520", "Electronics": "#3D78FF",
+              "Fashion": "#D9660A", "Home": "#179A68", "Sports": "#3E9BE6"},
+}
+
+with st.sidebar:
+    st.header("⚡ Real-time Lakehouse")
+    # Kept in the URL (?theme=dark) so the choice survives reloads and can be shared.
+    dark = st.toggle("🌙 Dark mode", value=st.query_params.get("theme") == "dark")
+    st.query_params["theme"] = "dark" if dark else "light"
+MODE = "dark" if dark else "light"
+M = MODES[MODE]
+CATS = CATEGORY_COLORS[MODE]
 
 CSS = f"""
 @import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@500&display=swap');
+:root {{ --paper: {M["paper"]}; --card: {M["card"]}; --field: {M["field"]}; --side: {M["side"]}; --ink: {M["ink"]}; }}
 
 html, body, p, li, label, input, textarea, button, [data-testid="stMarkdownContainer"] {{
   font-family: 'Space Grotesk', sans-serif !important;
 }}
-h1, h2, h3 {{ font-family: 'Archivo Black', sans-serif !important; letter-spacing: -0.02em; color: {INK}; }}
+h1, h2, h3 {{ font-family: 'Archivo Black', sans-serif !important; letter-spacing: -0.02em; }}
 code, pre {{ font-family: 'JetBrains Mono', monospace !important; }}
 .block-container {{ padding-top: 3.5rem; }}
 
+/* page colors (flip with the theme) */
+.stApp, [data-testid="stHeader"] {{ background: var(--paper); }}
+.stApp, .stApp p, .stApp li, .stApp label, .stApp h1, .stApp h2, .stApp h3, .stApp small,
+[data-testid="stCaptionContainer"], [data-testid="stWidgetLabel"], [data-testid="stHeader"] button,
+[data-testid="stSliderTickBar"] div {{ color: var(--ink); }}
+
 /* hero */
-.hero {{ background: {YELLOW}; border: 3px solid {INK}; box-shadow: 8px 8px 0 {INK}; padding: 28px 32px; margin-bottom: 28px; }}
+.hero {{ background: {YELLOW}; border: 3px solid var(--ink); box-shadow: 8px 8px 0 var(--ink); padding: 28px 32px; margin-bottom: 28px; }}
+.stApp .hero h1, .stApp .hero p, .hero .chips {{ color: {TILE_INK}; }}
 .hero h1 {{ font-size: 3rem; line-height: 1.05; margin: 8px 0 12px; padding: 0; }}
-.hero h1 .mark {{ background: {PINK}; border: 3px solid {INK}; padding: 0 10px; display: inline-block; transform: rotate(-1deg); }}
+.hero h1 .mark {{ background: {PINK}; border: 3px solid {TILE_INK}; padding: 0 10px; display: inline-block; transform: rotate(-1deg); }}
 .hero p {{ font-size: 1.05rem; font-weight: 500; margin: 0 0 16px; max-width: 760px; }}
-.kicker {{ display: inline-flex; align-items: center; gap: 8px; background: {INK}; color: #fff; font-weight: 700;
+.kicker {{ display: inline-flex; align-items: center; gap: 8px; background: {TILE_INK}; color: #fff; font-weight: 700;
           font-size: .8rem; letter-spacing: .12em; padding: 4px 10px; }}
 .dot {{ width: 10px; height: 10px; border-radius: 50%; background: #3DFF8B; animation: pulse 1.4s infinite; }}
 @keyframes pulse {{ 50% {{ opacity: .25; }} }}
 .chips {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-weight: 700; }}
-.chips span {{ background: #fff; border: 2px solid {INK}; box-shadow: 3px 3px 0 {INK}; padding: 3px 10px; font-size: .85rem; }}
+.chips span {{ background: #fff; border: 2px solid {TILE_INK}; box-shadow: 3px 3px 0 {TILE_INK}; padding: 3px 10px; font-size: .85rem; }}
 
-/* KPI tiles */
-[data-testid="stMetric"] {{ border: 3px solid {INK}; box-shadow: 6px 6px 0 {INK}; padding: 14px 18px; background: #fff; }}
+/* KPI tiles: bright fills, dark text in both modes */
+[data-testid="stMetric"] {{ border: 3px solid var(--ink); box-shadow: 6px 6px 0 var(--ink); padding: 14px 18px; background: var(--card); }}
 [data-testid="stMetricValue"] {{ font-family: 'Archivo Black', sans-serif !important; font-size: 2rem; }}
 [data-testid="stMetricLabel"] p {{ font-weight: 700 !important; text-transform: uppercase; letter-spacing: .04em; font-size: .72rem !important; }}
 [data-testid="stMetricLabel"] div, [data-testid="stMetricLabel"] p, [data-testid="stMetricDelta"] div {{ white-space: normal !important; overflow: visible !important; }}
-[data-testid="stMetricDelta"], [data-testid="stMetricDelta"] div {{ font-weight: 700; color: {INK} !important; }}
-[data-testid="stMetricDelta"] svg {{ fill: {INK} !important; }}
+[data-testid="stMetricDelta"] {{ font-weight: 700; }}
 {"".join(f'[data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child({i + 1}) [data-testid="stMetric"] {{ background: {c}; }}' for i, c in enumerate(KPI_COLORS))}
+[data-testid="stColumn"] [data-testid="stMetric"] *, .stApp [data-testid="stColumn"] [data-testid="stMetric"] p {{ color: {TILE_INK} !important; }}
+[data-testid="stMetricDelta"] svg {{ fill: {TILE_INK}; }}
 
 /* tabs */
 .stTabs [data-baseweb="tab-list"] {{ gap: 12px; }}
-.stTabs [data-baseweb="tab"] {{ border: 3px solid {INK}; background: #fff; padding: 6px 16px; box-shadow: 4px 4px 0 {INK}; }}
+.stTabs [data-baseweb="tab"] {{ border: 3px solid var(--ink); background: var(--card); padding: 6px 16px; box-shadow: 4px 4px 0 var(--ink); }}
 .stTabs [data-baseweb="tab"] p {{ font-weight: 700; }}
-.stTabs [aria-selected="true"] {{ background: {INK}; }}
-.stTabs [aria-selected="true"] p {{ color: #fff; }}
+.stTabs [aria-selected="true"] {{ background: var(--ink); }}
+.stApp .stTabs [aria-selected="true"] p {{ color: var(--paper); }}
 .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{ display: none; }}
 
 /* buttons */
-.stButton > button {{ border: 3px solid {INK}; border-radius: 0; box-shadow: 4px 4px 0 {INK}; font-weight: 700;
-                     background: #fff; color: {INK}; transition: transform .08s, box-shadow .08s; }}
-.stButton > button[kind="primary"] {{ background: {PINK}; color: {INK}; }}
-.stButton > button:hover {{ transform: translate(2px, 2px); box-shadow: 2px 2px 0 {INK}; border-color: {INK}; color: {INK}; }}
+.stButton > button {{ border: 3px solid var(--ink); border-radius: 0; box-shadow: 4px 4px 0 var(--ink); font-weight: 700;
+                     background: var(--card); color: var(--ink); transition: transform .08s, box-shadow .08s; }}
+.stButton > button[kind="primary"], .stApp .stButton > button[kind="primary"] p {{ background: {PINK}; color: {TILE_INK}; }}
+.stButton > button:hover {{ transform: translate(2px, 2px); box-shadow: 2px 2px 0 var(--ink); border-color: var(--ink); color: var(--ink); }}
 .stButton > button:active {{ transform: translate(4px, 4px); box-shadow: none; }}
 
-/* inputs, expanders, tables, alerts, code */
-[data-baseweb="select"] > div, [data-baseweb="textarea"], .stTextArea textarea {{ border: 3px solid {INK} !important; border-radius: 0 !important; }}
-[data-testid="stExpander"] details {{ border: 2px solid {INK}; border-radius: 0; background: #fff; }}
-[data-testid="stExpander"] summary p {{ font-family: 'JetBrains Mono', monospace !important; font-size: .8rem; }}
-[data-testid="stDataFrame"] {{ border: 2px solid {INK}; }}
-[data-testid="stAlert"] {{ border: 3px solid {INK}; border-radius: 0; box-shadow: 5px 5px 0 {INK}; }}
-[data-testid="stCode"] pre, .stCode pre {{ border: 2px solid {INK}; border-radius: 0; }}
+/* inputs & menus */
+[data-baseweb="select"] > div, [data-baseweb="textarea"], .stTextArea textarea {{
+  border: 3px solid var(--ink) !important; border-radius: 0 !important; background: var(--field) !important; color: var(--ink) !important; }}
+[data-baseweb="select"] div, [data-baseweb="select"] svg {{ color: var(--ink); }}
+[data-baseweb="popover"] ul, [data-baseweb="menu"] {{ background: var(--card) !important; }}
+[data-baseweb="popover"] li {{ color: var(--ink); }}
 
-/* chart cards (st.container(border=True)) */
+/* expanders, tables, alerts, code */
+[data-testid="stExpander"] details {{ border: 2px solid var(--ink); border-radius: 0; background: var(--card); }}
+[data-testid="stExpander"] summary, [data-testid="stExpander"] summary svg {{ color: var(--ink); }}
+[data-testid="stExpander"] summary p {{ font-family: 'JetBrains Mono', monospace !important; font-size: .8rem; }}
+[data-testid="stDataFrame"] {{ border: 2px solid var(--ink); }}
+[data-testid="stAlert"] {{ border: 3px solid var(--ink); border-radius: 0; box-shadow: 5px 5px 0 var(--ink); background: var(--card); }}
+[data-testid="stAlert"] > div {{ background: transparent; color: var(--ink); }}
+[data-testid="stCode"] pre, .stCode pre, .stMarkdown pre {{ border: 2px solid var(--ink); border-radius: 0; background: var(--field) !important; }}
+.stMarkdown pre code, [data-testid="stCode"] code {{ color: var(--ink); }}
+
+/* chart cards (st.container(border=True) holding a .card-title) */
 [data-testid="stVerticalBlockBorderWrapper"]:has(> div > [data-testid="stVerticalBlock"] > [data-testid="stElementContainer"] .card-title) {{
-  border: 3px solid {INK} !important; border-radius: 0 !important; box-shadow: 8px 8px 0 {INK}; background: #fff;
+  border: 3px solid var(--ink) !important; border-radius: 0 !important; box-shadow: 8px 8px 0 var(--ink); background: var(--card);
 }}
-.card-title {{ font-family: 'Archivo Black', sans-serif; font-size: 1.25rem; margin: 0 0 4px; }}
+.card-title {{ font-family: 'Archivo Black', sans-serif; font-size: 1.25rem; margin: 0 0 4px; color: var(--ink); }}
 .card-title .tag {{ font-family: 'Space Grotesk', sans-serif; font-size: .7rem; font-weight: 700; letter-spacing: .1em;
-                   background: {INK}; color: #fff; padding: 2px 8px; margin-left: 8px; vertical-align: middle; }}
+                   background: var(--ink); color: var(--paper); padding: 2px 8px; margin-left: 8px; vertical-align: middle; }}
 
 /* sidebar */
-[data-testid="stSidebar"] {{ border-right: 3px solid {INK}; }}
-[data-testid="stSidebar"] a {{ color: {INK}; font-weight: 700; text-decoration: underline 3px {PINK}; }}
+[data-testid="stSidebar"] {{ border-right: 3px solid var(--ink); background: var(--side); }}
+[data-testid="stSidebar"] a {{ color: var(--ink); font-weight: 700; text-decoration: underline 3px {PINK}; }}
 """
+if dark:
+    # Data grids are drawn on a canvas that CSS can't recolor, so flip the light grid instead.
+    # The border is set to black because it gets inverted too.
+    CSS += """[data-testid="stDataFrame"] { filter: invert(1) hue-rotate(180deg); border-color: #000; }\n"""
 st.markdown(f"<style>{CSS}</style>", unsafe_allow_html=True)
 
 
@@ -113,13 +155,14 @@ def card(title, tag=None):
 
 
 def brutal(chart, height=300):
-    """Shared Altair styling: black axes, no chart border, Space Grotesk type."""
+    """Shared Altair styling: ink-colored axes, no chart border, Space Grotesk type."""
     return (chart.properties(height=height)
             .configure(font="Space Grotesk", background="transparent")
             .configure_view(stroke=None)
-            .configure_axis(domainColor=INK, domainWidth=2, tickColor=INK, labelColor=INK, titleColor=INK,
-                            gridColor="#1111111A", labelFontSize=12, titleFontWeight=700)
-            .configure_legend(labelFontSize=12, symbolStrokeColor=INK, symbolStrokeWidth=1.5, orient="bottom", title=None))
+            .configure_axis(domainColor=M["ink"], domainWidth=2, tickColor=M["ink"], labelColor=M["ink"],
+                            titleColor=M["ink"], gridColor=M["grid"], labelFontSize=12, titleFontWeight=700)
+            .configure_legend(labelFontSize=12, labelColor=M["ink"], symbolStrokeColor=M["ink"],
+                              symbolStrokeWidth=1.5, orient="bottom", title=None))
 
 
 def draw(chart, height=300):
@@ -148,9 +191,15 @@ def query(sql):
     return df, (time.perf_counter() - start) * 1000
 
 
+def code(text):
+    # Syntax-highlighted blocks (st.code, or ```sql fences) render "[object Object]" after a
+    # fragment re-run in Streamlit 1.41, so SQL is shown as a plain fence without a language.
+    st.markdown(f"```\n{text.strip()}\n```")
+
+
 def show_sql(sql, ms, rows):
     with st.expander(f"🔍 SQL · {ms:.0f} ms · {rows} rows"):
-        st.code(sql.strip(), language="sql")
+        code(sql)
 
 
 # ---------------------------------------------------------------- queries
@@ -216,7 +265,7 @@ def waiting(err):
         "~1 minute later. This page refreshes on its own."
     )
     with st.expander("Details"):
-        st.code(str(err))
+        code(str(err))
 
 
 def pct_delta(now, prev):
@@ -225,7 +274,6 @@ def pct_delta(now, prev):
 
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
-    st.header("⚡ Real-time Lakehouse")
     refresh = st.selectbox("Auto-refresh", [5, 10, 30, 0], index=1,
                            format_func=lambda s: f"every {s}s" if s else "off")
     st.markdown("**Open the other UIs**")
@@ -293,11 +341,11 @@ def live():
                        "(window end + 5 s watermark delay).")
         else:
             rev["time"] = pd.to_datetime(rev.minute).dt.strftime("%H:%M")
-            draw(alt.Chart(rev).mark_bar(stroke=INK, strokeWidth=1.5).encode(
+            draw(alt.Chart(rev).mark_bar(stroke=M["ink"], strokeWidth=1.5).encode(
                 x=alt.X("time:O", title=None, axis=alt.Axis(labelAngle=0)),
                 y=alt.Y("revenue:Q", title="Revenue ($)", stack=True),
                 color=alt.Color("category:N", scale=alt.Scale(
-                    domain=list(CATEGORY_COLORS), range=list(CATEGORY_COLORS.values()))),
+                    domain=list(CATS), range=list(CATS.values()))),
                 order=alt.Order("category:N"),
                 tooltip=["time:O", "category:N", alt.Tooltip("revenue:Q", format="$,.0f")],
             ))
@@ -312,9 +360,9 @@ def live():
             x=alt.X("count:Q", title=None, axis=alt.Axis(labels=False, ticks=False, grid=False),
                     scale=alt.Scale(domain=[0, max(steps["count"].max(), 1) * 1.45])),  # room for labels
         )
-        draw(base.mark_bar(fill=YELLOW, stroke=INK, strokeWidth=2.5, height=34)
+        draw(base.mark_bar(fill=YELLOW, stroke=M["ink"], strokeWidth=2.5, height=34)
              .encode(tooltip=["step", alt.Tooltip("count:Q", format=",")])
-             + base.mark_text(align="left", dx=8, fontWeight=700, fontSize=14, color=INK)
+             + base.mark_text(align="left", dx=8, fontWeight=700, fontSize=14, color=M["ink"])
              .encode(text=alt.Text("count:Q", format=",")), height=300)
         show_sql(FUNNEL_SQL, funnel_ms, len(funnel))
 
@@ -331,7 +379,7 @@ def live():
         show_sql(TOP_PRODUCTS_SQL, ms, len(top))
     with right, card("Revenue by country", "LAST 15 MIN"):
         countries, ms = query(COUNTRY_SQL)
-        draw(alt.Chart(countries).mark_bar(fill=BLUE, stroke=INK, strokeWidth=2).encode(
+        draw(alt.Chart(countries).mark_bar(fill=BLUE, stroke=M["ink"], strokeWidth=2).encode(
             x=alt.X("country:N", sort="-y", title=None, axis=alt.Axis(labelAngle=0)),
             y=alt.Y("revenue:Q", title="Revenue ($)"),
             tooltip=["country", alt.Tooltip("revenue:Q", format="$,.0f")],
@@ -392,13 +440,13 @@ LIMIT 200
         st.success(f"Done in {ms / 1000:.1f} s: {fr.data_files:,} → {after.iloc[0].data_files:,} data files. "
                    "A new `replace` snapshot was committed. Flink kept writing throughout "
                    "(optimistic concurrency).")
-        st.code(sql, language="sql")
+        code(sql)
 
     st.write("")
     with card("Commits over time", "1 SNAPSHOT PER CHECKPOINT"):
         if not snaps.empty:
             draw(alt.Chart(snaps).mark_line(color=PINK, strokeWidth=3, point=alt.OverlayMarkDef(
-                    fill=PINK, stroke=INK, strokeWidth=1.5, size=60)).encode(
+                    fill=PINK, stroke=M["ink"], strokeWidth=1.5, size=60)).encode(
                 x=alt.X("committed_at:T", title=None),
                 y=alt.Y("added_records:Q", title="Records added"),
                 tooltip=[alt.Tooltip("committed_at:T", format="%H:%M:%S"), "operation", "added_records", "added_files"],
