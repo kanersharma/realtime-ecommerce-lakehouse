@@ -1,0 +1,82 @@
+"""Full pipeline: a real order through the running shop must become queryable in Iceberg via Trino.
+
+Needs the stack: docker compose up -d --build (shop on :8000, Trino on :8090). Skipped when it isn't up,
+so a skip here means the end-to-end pipeline was NOT verified.
+"""
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+import pytest
+
+pytestmark = pytest.mark.integration
+SHOP, TRINO_PORT = "http://localhost:8000", 8090
+TIMEOUT = 120  # checkpoint every 10 s; allow for a cold Flink job
+
+
+def reachable(url):
+    try:
+        urllib.request.urlopen(url, timeout=3)
+        return True
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+@pytest.fixture(scope="module")
+def stack():
+    if not (reachable(f"{SHOP}/api/products") and reachable(f"http://localhost:{TRINO_PORT}/v1/info")):
+        pytest.skip("Docker stack is not running (docker compose up -d --build)")
+    import httpx
+    import trino
+    conn = trino.dbapi.connect(host="localhost", port=TRINO_PORT, user="integration-test",
+                               catalog="lakehouse", schema="shop")
+    return httpx.Client(base_url=SHOP, timeout=10), conn
+
+
+def query(conn, sql):
+    cur = conn.cursor()
+    cur.execute(sql)
+    return cur.fetchall()
+
+
+def poll(conn, sql, expected):
+    deadline, last = time.time() + TIMEOUT, None
+    while time.time() < deadline:
+        try:
+            last = query(conn, sql)
+            if last == expected:
+                return
+        except Exception as err:  # tables may not exist until the Flink job's first commit
+            last = err
+        time.sleep(3)
+    pytest.fail(f"after {TIMEOUT}s: {sql!r} returned {last!r}, expected {expected!r}")
+
+
+def test_a_real_order_reaches_the_lakehouse(stack):
+    http, conn = stack
+    user, session = f"W-it{uuid.uuid4().hex[:12]}", f"S-it{uuid.uuid4().hex[:12]}"
+    for kind in ("page_view", "add_to_cart"):
+        r = http.post("/api/events", json={"event_type": kind, "product_id": "P021",
+                                           "user_id": user, "session_id": session})
+        assert r.status_code == 202, r.text
+    r = http.post("/api/checkout", json={
+        "user_id": user, "session_id": session, "name": "Integration Test", "country": "JP",
+        "items": [{"product_id": "P021", "quantity": 3}], "payment": {"method": "cod"}})
+    assert r.status_code == 200, r.text
+
+    poll(conn, f"SELECT count(*) FROM clicks WHERE session_id = '{session}'", [[2]])
+    poll(conn, f"SELECT product_id, quantity, CAST(total_amount AS double), country, payment_method "
+               f"FROM orders WHERE session_id = '{session}'", [["P021", 3, 144.0, "JP", "cod"]])
+
+
+def test_declined_payment_never_reaches_the_lakehouse(stack):
+    http, conn = stack
+    user, session = f"W-it{uuid.uuid4().hex[:12]}", f"S-it{uuid.uuid4().hex[:12]}"
+    r = http.post("/api/checkout", json={
+        "user_id": user, "session_id": session, "name": "Integration Test", "country": "IN",
+        "items": [{"product_id": "P001", "quantity": 1}],
+        "payment": {"method": "card", "card_number": "4000 0000 0000 0002", "expiry": "12/30", "cvc": "123"}})
+    assert r.status_code == 402
+    time.sleep(25)  # > 2 checkpoints
+    assert query(conn, f"SELECT count(*) FROM orders WHERE session_id = '{session}'") == [[0]]

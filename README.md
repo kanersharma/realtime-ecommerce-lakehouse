@@ -239,19 +239,41 @@ ALTER TABLE orders EXECUTE optimize;
 │   └── jvm.config              # fixed 1 GB heap (prevents OOM-kill in a 1.5 GB container)
 ├── shop/
 │   ├── main.py                 # storefront API: catalog, click events, fake checkout -> Kafka
-│   ├── static/                 # bento UI: index.html, styles.css, app.js (no build step)
-│   └── test_shop.py            # self-check: cd shop && python test_shop.py
+│   └── static/                 # bento UI: index.html, styles.css, app.js (no build step)
 ├── catalog/products.json       # 24 fake products, shared by shop and simulator
 ├── generator/
-│   ├── generator.py            # optional traffic simulator (--profile simulator)
-│   └── test_generator.py       # self-check: python generator/test_generator.py
+│   └── generator.py            # optional traffic simulator (--profile simulator)
 ├── dashboard/
 │   └── app.py                  # Streamlit app
-├── CLAUDE.md                   # context for AI coding assistants
+├── tests/                      # pytest suite: unit, contract, API, dashboard, browser e2e, integration
+├── requirements-dev.txt        # test tooling
+├── CLAUDE.md                   # context for AI coding assistants (incl. the mandatory testing workflow)
 └── README.md
 ```
 
 ---
+
+## Testing
+
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements-dev.txt     # Linux/macOS: .venv/bin/python
+.venv/Scripts/python -m pytest -rs
+```
+
+| Suite | What it proves |
+|---|---|
+| `test_catalog.py` | Catalog integrity; categories stay in sync across catalog, dashboard colors and store UI |
+| `test_contract.py` | Shop and simulator events have exactly the columns Flink reads in `pipeline.sql` |
+| `test_shop_api.py` | Every endpoint and payment method (card / UPI / COD), validation, price tampering, no card-data leaks |
+| `test_generator.py` | Simulator funnel logic |
+| `test_dashboard.py` | Dashboard run headless (Streamlit `AppTest`) against a fake Trino: KPIs, themes, SQL guard |
+| `test_storefront_e2e.py` | A real browser (Playwright + Edge) shops: search, cart, every checkout, server-down handling, layout |
+| `test_integration.py` | With `docker compose up`: a real order flows through Kafka → Flink → Iceberg and is queryable in Trino |
+
+The integration tests skip when the stack isn't running. Start it first to verify the full pipeline.
+Browser tests use the installed Edge; set `E2E_BROWSER=chromium` after `playwright install chromium`
+to use Playwright's own Chromium instead.
 
 ## Design decisions and trade-offs
 

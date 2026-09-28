@@ -9,6 +9,36 @@ An optional simulator (`generator/`) can add background traffic.
 It has two goals: be easy to run (`docker compose up -d --build`) and show senior-level data
 engineering (event time, watermarks, exactly-once, table maintenance, time travel).
 
+## ⚠️ Testing is mandatory: every create or update, before calling it done
+The owner's standing rule: **whenever anything is created or changed, run the tests and verify it works
+end to end before making the final change (commit, push, or saying "done").** Concretely:
+
+1. **Write or update tests in the same change.** A new feature gets new tests, and a bug fix gets a
+   test that fails without the fix. Tests live in `tests/`:
+   | File | Covers |
+   |---|---|
+   | `test_catalog.py` | catalog integrity; the 6 categories stay in sync across catalog, dashboard and shop UI |
+   | `test_contract.py` | shop and simulator events have exactly the columns in `pipeline.sql` |
+   | `test_shop_api.py` | every endpoint and payment method (card/UPI/COD), validation, price tampering, no card-data leaks |
+   | `test_generator.py` | simulator funnel logic |
+   | `test_dashboard.py` | dashboard via Streamlit `AppTest` with a fake Trino: KPIs, themes, waiting state, SQL guard |
+   | `test_storefront_e2e.py` | real browser (Playwright + Edge): search, cart, all checkouts, server-down message, layout |
+   | `test_integration.py` | running stack: a real order lands in Iceberg and is queryable in Trino |
+2. **Run the whole suite**, not just the file you touched:
+   ```bash
+   python -m venv .venv && .venv/Scripts/python -m pip install -r requirements-dev.txt   # once
+   .venv/Scripts/python -m pytest -rs
+   ```
+   Everything must pass. A failing test is fixed or explained to the owner, never deleted to go green.
+3. **Integration tests must RUN, not skip**, for any change touching the shop, events, pipeline,
+   catalog, Trino config or docker-compose: `docker compose up -d --build`, wait for the Flink job
+   (`curl -s localhost:8081/jobs/overview` → RUNNING), then run pytest again. A skip in
+   `test_integration.py` means the pipeline was **not** verified, so say so explicitly.
+4. **Look at UI changes in a real browser** (store :8000, dashboard :8501, light and dark), including
+   mobile width. Tests check behavior; your eyes check layout.
+5. **Prove a new test can fail.** Break the code on purpose once, see the test go red, then restore it.
+6. Report results honestly: pass/fail counts, what was skipped and why.
+
 ## Service map (docker-compose.yml)
 | Service | Image | Port (host→container) | Notes |
 |---|---|---|---|
@@ -39,9 +69,10 @@ The catalog name `lakehouse` and schema `shop` are the same in Flink and Trino. 
 - `catalog/products.json`: the single product catalog, mounted at `/catalog/products.json` into shop and
   generator. Both load it as `Path(__file__).parent.parent / "catalog" / "products.json"`. Keep the six
   categories in sync with `CATEGORY_COLORS` (dashboard) and `CATS` (shop/static/app.js).
-- `shop/main.py`: pure functions `authorize`, `click_event`, `order_events` (tested in `shop/test_shop.py`)
+- `shop/main.py`: pure functions `authorize`, `click_event`, `order_events` (tested in `tests/`)
   plus the FastAPI routes. `shop/static/`: no-build UI (index.html, styles.css, app.js).
 - `generator/generator.py`: `session_events(now, rng)` is pure and tested; `main()` does Kafka I/O.
+- `tests/`: the whole test suite (pytest; config in `pytest.ini`, deps in `requirements-dev.txt`).
 - `dashboard/app.py`: all SQL is in module-level constants; `query(sql) -> (DataFrame, ms)`.
 
 ## Commands
@@ -51,8 +82,8 @@ docker compose down -v                        # stop and wipe all data (Kafka, S
 docker compose up -d --build dashboard        # rebuild one service after editing it
 docker compose run --rm flink-job             # submit pipeline.sql (no-op if a job is already running)
 docker compose exec trino trino --catalog lakehouse --schema shop   # SQL shell
-python generator/test_generator.py            # generator self-check (no Kafka needed)
-cd shop && python test_shop.py                # storefront self-check (no Kafka needed)
+.venv/Scripts/python -m pytest -rs           # ALL tests (see "Testing is mandatory" above)
+.venv/Scripts/python -m pytest -m "not e2e"   # fast loop while iterating (still run everything before done)
 cd shop && uvicorn main:app --port 8000       # UI without Docker: events are printed (dry run)
 docker compose --profile simulator up -d      # add simulated background traffic
 curl -s localhost:8081/jobs/overview          # Flink job state
@@ -113,6 +144,9 @@ To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
   After bumping `streamlit` in `requirements.txt`, open the dashboard and check the cards, tabs and KPI tiles.
 - **`st.code` / ```` ```sql ```` fences show `[object Object]`** after a fragment re-run (Streamlit 1.41
   syntax-highlighter bug). Use the `code()` helper in `app.py`, which renders a plain fence without a language.
+- **"Failed to fetch" in the store** means the browser got no response at all (the shop server is down or
+  was restarted under an open page), not an API error. `app.js` turns it into a readable message. Check
+  `docker compose ps shop` first.
 - **Port 8080** is commonly taken (Airflow), so Trino is published on 8090.
 - Flink's first checkpoint can fail with `UnknownHostException` if containers start in the wrong order.
   The fixed-delay restart strategy recovers on its own.

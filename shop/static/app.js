@@ -28,8 +28,15 @@ let cart = JSON.parse(localStorage.getItem("ls_cart") || "{}"); // { productId: 
 let sent = Number(sessionStorage.getItem("ls_sent") || 0);
 
 // ------------------------------------------------ API
+const OFFLINE = "Can't reach the Lakeshop server. Is it running? Start it with `docker compose up -d` and try again.";
+
 async function api(path, body) {
-  const res = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
+  let res;
+  try {
+    res = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
+  } catch {
+    throw new Error(OFFLINE); // network failure: fetch rejects with a bare "Failed to fetch"
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const d = data.detail;
@@ -252,7 +259,13 @@ document.querySelectorAll("dialog").forEach((d) => d.addEventListener("click", (
 
 // ------------------------------------------------ boot
 (async function init() {
-  products = await api("/api/products");
+  try {
+    products = await api("/api/products");
+  } catch (e) {
+    $("#empty").textContent = e.message;
+    $("#empty").hidden = false;
+    return;
+  }
   byId = Object.fromEntries(products.map((p) => [p.id, p]));
   cart = Object.fromEntries(Object.entries(cart).filter(([id]) => byId[id]));
   const f = byId[FEATURED];

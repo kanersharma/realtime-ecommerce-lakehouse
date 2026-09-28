@@ -1,0 +1,9 @@
+# Test tooling: python -m pip install -r requirements-dev.txt  (see "Testing" in README / CLAUDE.md)
+pytest==8.3.4
+httpx==0.28.1                # FastAPI TestClient
+fastapi==0.115.6
+uvicorn==0.34.0
+streamlit==1.41.1            # streamlit.testing.v1.AppTest for the dashboard
+trino==0.331.0
+playwright==1.49.1           # browser end-to-end tests of the storefront
+greenlet<3.2                 # playwright dependency; newer versions have no Python 3.9 wheels

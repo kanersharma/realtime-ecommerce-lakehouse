@@ -282,7 +282,7 @@ with st.sidebar:
         st.markdown(f"- [{label}]({url})")
     st.markdown("**Data flow**")
     st.markdown("""```
-generator (Python)
+Lakeshop  (+ optional simulator)
    │  JSON events
    ▼
 Kafka  clicks · orders
