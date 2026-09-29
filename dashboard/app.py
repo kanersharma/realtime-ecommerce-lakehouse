@@ -20,6 +20,7 @@ import inventory as inv  # pure forecasting / reorder math (dashboard/inventory.
 
 TABLES = ["orders", "clicks", "inventory_movements", "revenue_per_minute", "funnel_per_minute"]
 SHOP_URL = os.getenv("SHOP_URL", "http://localhost:8000")  # restock goes to the shop, the system of record
+REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8085")  # read-only: subjects and versions
 # Stock status colors: reserved for status (never a category), always shown with the status text.
 STATUS_COLORS = {"Out of stock": "#C62828", "Reorder now": "#F2A900", "Reorder soon": "#FFE08A",
                  "OK": "#7CE0C3", "No demand": "#C9C9C9"}
@@ -286,6 +287,28 @@ GROUP BY 1
 ORDER BY 2 DESC
 """
 
+DEVICE_SQL = """
+-- `device` arrived in clicks schema v2; events from before it read NULL (Iceberg added the column
+-- in place, without rewriting old files).
+WITH s AS (
+  SELECT session_id, coalesce(max(device), 'unknown (before v2)') AS device
+  FROM clicks
+  WHERE event_time > localtimestamp - INTERVAL '15' MINUTE
+  GROUP BY 1
+), o AS (
+  SELECT DISTINCT session_id FROM orders WHERE event_time > localtimestamp - INTERVAL '15' MINUTE
+)
+SELECT s.device, count(*) AS sessions, count(o.session_id) AS converted
+FROM s LEFT JOIN o ON o.session_id = s.session_id
+GROUP BY 1
+ORDER BY 2 DESC
+"""
+
+
+def registry(path):
+    with urllib.request.urlopen(f"{REGISTRY_URL}{path}", timeout=3) as r:
+        return json.load(r)
+
 
 def waiting(err):
     st.info(
@@ -311,9 +334,10 @@ with st.sidebar:
     st.markdown("**Data flow**")
     st.markdown("""```
 Lakeshop  (+ optional simulator)
-   │  JSON events
+   │  Avro (Schema Registry)
    ▼
 Kafka  clicks · orders
+       · inventory
    │
    ▼
 Flink SQL  watermarks, windows
@@ -421,6 +445,33 @@ def live():
             tooltip=["country", alt.Tooltip("revenue:Q", format="$,.0f")],
         ), height=340)
         show_sql(COUNTRY_SQL, ms, len(countries))
+
+    st.write("")
+    left, right = st.columns([2, 1], gap="large")
+    with left, card("Sessions by device", "LAST 15 MIN · SCHEMA V2"):
+        devices, ms = query(DEVICE_SQL)
+        devices["label"] = [f"{n:,} · {c / n:.0%}" for n, c in zip(devices.sessions, devices.converted)]
+        base = alt.Chart(devices).encode(
+            y=alt.Y("device:N", sort=None, title=None),
+            x=alt.X("sessions:Q", title=None, axis=alt.Axis(labels=False, ticks=False, grid=False),
+                    scale=alt.Scale(domain=[0, max(devices.sessions.max() if len(devices) else 1, 1) * 1.8])))
+        draw(base.mark_bar(fill=PINK, stroke=M["ink"], strokeWidth=2, height=28)
+             .encode(tooltip=["device", "sessions", "converted"])
+             + base.mark_text(align="left", dx=8, fontWeight=700, color=M["ink"]).encode(text="label:N"),
+             height=max(120, 48 * len(devices)))
+        st.caption("Sessions · share that ordered. `device` was added to the click schema in v2 (mobile / "
+                   "tablet / desktop, from the User-Agent); older events have none and show as unknown.")
+        show_sql(DEVICE_SQL, ms, len(devices))
+    with right, card("Event schemas", "REGISTRY"):
+        try:
+            level = registry("/config")["compatibilityLevel"]
+            st.markdown("\n".join(f"- `{s}` · {len(registry(f'/subjects/{s}/versions'))} version(s)"
+                                   for s in sorted(registry("/subjects"))))
+            st.caption(f"Compatibility **{level}**: every new version must read the old events and be "
+                       "readable by the old consumers, so a producer can't break the Flink job. Only "
+                       "optional fields with a default can be added.")
+        except Exception as err:
+            st.caption(f"Schema Registry not reachable at {REGISTRY_URL}: {err}")
 
 
 with live_tab:
@@ -687,6 +738,12 @@ ORDER BY on_hand""",
 FROM inventory_movements
 WHERE product_id = 'P002'
 ORDER BY seq DESC""",
+    "Schema evolution: clicks by device": """-- device arrived in clicks schema v2: older rows read NULL (no files were rewritten)
+SELECT coalesce(device, 'NULL (before schema v2)') AS device,
+       count(*) AS clicks, min(event_time) AS first_seen, max(event_time) AS last_seen
+FROM clicks
+GROUP BY 1
+ORDER BY first_seen""",
     "Iceberg partitions": 'SELECT * FROM "orders$partitions"',
     "Table DDL": "SHOW CREATE TABLE orders",
 }
@@ -700,7 +757,8 @@ def playground():
     sql = st.text_area("SQL", EXAMPLES[example], height=180, key=f"sql_{example}")
     if st.button("▶ Run", type="primary"):
         sql = sql.strip().rstrip(";")
-        if not sql or sql.split()[0].lower() not in READ_ONLY:
+        words = " ".join(line for line in sql.splitlines() if not line.strip().startswith("--")).split()
+        if not words or words[0].lower() not in READ_ONLY:  # the first keyword after any -- comments
             st.error(f"Playground is read-only. Start with one of: {', '.join(READ_ONLY).upper()}.")
         else:
             try:

@@ -1,0 +1,19 @@
+{
+  "type": "record",
+  "name": "StockMovement",
+  "namespace": "lakeshop.events",
+  "doc": "One change to a product's stock, from the shop's ledger. Topic `inventory`, key = product_id.",
+  "fields": [
+    {"name": "seq", "type": "long", "doc": "the shop ledger's global order of movements"},
+    {"name": "product_id", "type": "string"},
+    {"name": "product_name", "type": "string"},
+    {"name": "category", "type": "string"},
+    {"name": "reason", "type": "string", "doc": "initial | snapshot | order | restock | settings | removed"},
+    {"name": "delta", "type": "int"},
+    {"name": "on_hand_after", "type": "int"},
+    {"name": "unit_price", "type": {"type": "bytes", "logicalType": "decimal", "precision": 10, "scale": 2}},
+    {"name": "lead_time_days", "type": "int"},
+    {"name": "target_cover_days", "type": "int"},
+    {"name": "event_time", "type": {"type": "long", "logicalType": "timestamp-millis"}, "doc": "UTC"}
+  ]
+}

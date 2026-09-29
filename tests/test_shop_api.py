@@ -50,6 +50,23 @@ def test_click_events_go_to_clicks_topic(client, events, event_type):
     assert re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}", e["event_time"])
 
 
+IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
+ANDROID_PHONE = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/126.0 Mobile Safari/537.36"
+ANDROID_TABLET = "Mozilla/5.0 (Linux; Android 13; SM-X710) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"
+IPAD = "Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
+DESKTOP = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36 Edg/126.0"
+
+
+@pytest.mark.parametrize("ua,device", [(IPHONE, "mobile"), (ANDROID_PHONE, "mobile"), (IPAD, "tablet"),
+                                       (ANDROID_TABLET, "tablet"), (DESKTOP, "desktop"), ("", "desktop")])
+def test_the_server_sets_the_device_from_the_user_agent(client, events, ua, device):
+    """Schema v2 field. The server derives it, like prices: the browser's JSON can't set it."""
+    r = client.post("/api/events", headers={"User-Agent": ua},
+                    json={"event_type": "page_view", "product_id": "P015", "user_id": USER,
+                          "session_id": SESSION, "device": "fridge"})
+    assert r.status_code == 202 and events[0][2]["device"] == device
+
+
 @pytest.mark.parametrize("patch,status", [
     ({"event_type": "purchase"}, 422),        # only the two funnel events
     ({"product_id": "NOPE"}, 404),

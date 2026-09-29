@@ -32,7 +32,9 @@ action is an **event**. The green **📡 Live events** tile counts what this bro
 ![Search results](screenshots/store-search.png)
 
 Type into the search bar, then open a product. Opening it sends a `page_view` event to the Kafka
-topic `clicks`, keyed by the anonymous shopper id.
+topic `clicks`, keyed by the anonymous shopper id. The event is **Avro**, checked against the
+registered `clicks` schema before it's sent, and the server adds your `device` from the browser's
+User-Agent (open the store on your phone to see "mobile" appear).
 
 ![Product dialog](screenshots/store-product.png)
 
@@ -114,6 +116,32 @@ Open **📦 Inventory** on the dashboard.
 - A good question for the audience: a sold-out product sold nothing today, so why is its forecast not
   zero? (Nobody *could* buy it: the demand is censored, so the forecast uses the average instead.)
 
+## 6b · Contracts: the Schema Registry and schema evolution
+
+![Sessions by device and the registered schemas](screenshots/dashboard-devices.png)
+
+At the bottom of the Live tab, **Sessions by device** uses `device`, a field added in **v2** of the click
+schema, and **Event schemas** lists what the registry holds. Points worth making:
+
+- Every topic has an Avro schema (`schemas/*.avsc`) in a **Confluent Schema Registry** (Kafka UI →
+  *Schema Registry*, or http://localhost:8085/subjects). Kafka UI decodes the binary messages with it.
+- Compatibility is **FULL**: a new version must read old events and be readable by old consumers.
+  Show the registry refusing a breaking change (dropping fields and adding a required `coupon`):
+
+  ```bash
+  curl -s -X POST localhost:8085/compatibility/subjects/clicks-value/versions/latest \
+    -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+    -d '{"schema": "{\"type\":\"record\",\"name\":\"Click\",\"namespace\":\"lakeshop.events\",\"fields\":[{\"name\":\"event_id\",\"type\":\"string\"},{\"name\":\"coupon\",\"type\":\"string\"}]}"}'
+  # {"is_compatible":false}
+  ```
+- `device` went in the safe way: optional in the schema, `ALTER TABLE clicks ADD COLUMN device` in
+  Iceberg (metadata only, no file rewritten), then the Flink DDL. Old rows read NULL.
+
+![Schema evolution in the SQL playground](screenshots/dashboard-sql.png)
+
+The SQL playground's *Schema evolution: clicks by device* example shows both generations side by side:
+rows from before v2 (NULL device) and the new ones, in the same table, with no migration job.
+
 ## 7 · Under the hood: the lakehouse
 
 ![Lakehouse internals](screenshots/dashboard-internals.png)
@@ -122,10 +150,8 @@ Open **📦 Inventory** on the dashboard.
 - Press **🧹 Compact now** to run Trino's `OPTIMIZE` while Flink keeps writing.
 - Drag the **time travel** slider to query the table as it was at any earlier snapshot.
 
-![SQL playground](screenshots/dashboard-sql.png)
-
 The SQL playground runs read-only SQL across tables that a streaming job wrote and a batch engine
-reads. *Cart abandonment by category* joins `clicks` and `orders`.
+reads. Try *Cart abandonment by category*, which joins `clicks` and `orders`.
 
 ## 8 · The mobile view
 
@@ -134,7 +160,7 @@ reads. *Cart abandonment by category* joins `clicks` and `orders`.
 ---
 
 **Other UIs worth showing:** Flink job graph and checkpoints (http://localhost:8081), messages
-arriving in Kafka (http://localhost:8088), and the Parquet files in the RustFS console
+arriving in Kafka and the registered schemas (http://localhost:8088), and the Parquet files in the RustFS console
 (http://localhost:9001, `admin` / `password`).
 
 To refresh these screenshots after a UI change: `docker compose run --rm demo` (rebuild the toolbox

@@ -4,6 +4,8 @@ Needs the stack: docker compose up -d --build (shop on :8000, Trino on :8090). S
 so a skip here means the end-to-end pipeline was NOT verified. Inside the Docker toolbox
 (`docker compose run --rm tests`) the hosts come from SHOP_URL / TRINO_HOST / TRINO_PORT.
 """
+import ast
+import json
 import os
 import time
 import urllib.error
@@ -16,6 +18,9 @@ pytestmark = pytest.mark.integration
 SHOP = os.getenv("SHOP_URL", "http://localhost:8000")
 TRINO_HOST = os.getenv("TRINO_HOST", "localhost")
 TRINO_PORT = int(os.getenv("TRINO_PORT", "8090"))
+KAFKA = os.getenv("KAFKA_BOOTSTRAP", "localhost:29092")
+REGISTRY = os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8085")
+IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
 TIMEOUT = 120  # checkpoint every 10 s; allow for a cold Flink job
 
 
@@ -58,6 +63,13 @@ def poll(conn, sql, expected):
     pytest.fail(f"after {TIMEOUT}s: {sql!r} returned {last!r}, expected {expected!r}")
 
 
+def in_stock(http, product_id, quantity):
+    """Seed products' stock is shared with demo and simulator traffic, which can sell them out. Top it
+    up through the shop (the system of record) so a sold-out product can't fail an unrelated test."""
+    r = http.post(f"/api/products/{product_id}/restock", json={"quantity": quantity})
+    assert r.status_code == 200, r.text
+
+
 def test_a_real_order_reaches_the_lakehouse(stack):
     http, conn = stack
     user, session = f"W-it{uuid.uuid4().hex[:12]}", f"S-it{uuid.uuid4().hex[:12]}"
@@ -65,6 +77,7 @@ def test_a_real_order_reaches_the_lakehouse(stack):
         r = http.post("/api/events", json={"event_type": kind, "product_id": "P021",
                                            "user_id": user, "session_id": session})
         assert r.status_code == 202, r.text
+    in_stock(http, "P021", 3)
     r = http.post("/api/checkout", json={
         "user_id": user, "session_id": session, "name": "Integration Test", "country": "JP",
         "items": [{"product_id": "P021", "quantity": 3}], "payment": {"method": "cod"}})
@@ -109,6 +122,7 @@ def test_a_single_order_shows_in_revenue_per_minute_without_later_traffic(stack)
     chart must still show that minute, computed live from bronze orders."""
     http, conn = stack
     session = f"S-it{uuid.uuid4().hex[:12]}"
+    in_stock(http, "P002", 1)
     r = http.post("/api/checkout", json={
         "user_id": f"W-it{uuid.uuid4().hex[:12]}", "session_id": session, "name": "Integration Test",
         "country": "IN", "items": [{"product_id": "P002", "quantity": 1}], "payment": {"method": "cod"}})
@@ -191,3 +205,94 @@ def test_stock_in_the_lakehouse_matches_the_shop(stack):
         assert http.delete(f"/api/products/{pid}").status_code == 204
     poll(conn, f"SELECT count(*) FROM ({inv.inventory_sql()}) WHERE product_id = '{pid}'", [[0]])
 
+
+# ------------------------------------------------ Avro + Schema Registry (Phase 10)
+def registry(method, path, body=None):
+    import httpx
+    r = httpx.request(method, REGISTRY + path, json=body, timeout=10,
+                      headers={"Content-Type": "application/vnd.schemaregistry.v1+json"})
+    r.raise_for_status()
+    return r.json()
+
+
+def partition_ends(consumer, topic):
+    from confluent_kafka import TopicPartition
+    return {p: consumer.get_watermark_offsets(TopicPartition(topic, p), timeout=10)[1] for p in range(3)}
+
+
+def test_every_topic_carries_registered_avro(stack):
+    """Confluent wire format: magic byte 0, then the 4-byte id of a schema registered for the topic."""
+    from confluent_kafka import Consumer, TopicPartition
+    http, _ = stack
+    consumer = Consumer({"bootstrap.servers": KAFKA, "group.id": f"it-{uuid.uuid4().hex}",
+                         "enable.auto.commit": False})
+    try:
+        in_stock(http, "P021", 1)
+        topics = ("clicks", "orders", "inventory")
+        before = {t: partition_ends(consumer, t) for t in topics}
+        user, session = f"W-it{uuid.uuid4().hex[:12]}", f"S-it{uuid.uuid4().hex[:12]}"
+        assert http.post("/api/events", json={"event_type": "page_view", "product_id": "P021",
+                                              "user_id": user, "session_id": session}).status_code == 202
+        r = http.post("/api/checkout", json={
+            "user_id": user, "session_id": session, "name": "Integration Test", "country": "IN",
+            "items": [{"product_id": "P021", "quantity": 1}], "payment": {"method": "cod"}})
+        assert r.status_code == 200, r.text
+        time.sleep(1)
+        assert registry("GET", "/config")["compatibilityLevel"] == "FULL"
+        for topic in topics:
+            after = partition_ends(consumer, topic)
+            consumer.assign([TopicPartition(topic, p, before[topic][p]) for p in after if after[p] > before[topic][p]])
+            wanted, values, deadline = sum(after[p] - before[topic][p] for p in after), [], time.time() + 20
+            while len(values) < wanted and time.time() < deadline:
+                m = consumer.poll(1)
+                if m is not None and not m.error():
+                    values.append(m.value())
+            assert values, f"no new {topic} messages"
+            for v in values:
+                assert v[0] == 0, f"{topic}: not Confluent Avro: {v[:40]!r}"
+                subjects = registry("GET", f"/schemas/ids/{int.from_bytes(v[1:5], 'big')}/subjects")
+                assert f"{topic}-value" in subjects
+    finally:
+        consumer.close()
+
+
+def test_registry_accepts_only_compatible_schema_changes(stack):
+    """FULL compatibility, checked against a scratch subject holding clicks v1 (before `device`)."""
+    from conftest import ROOT
+    v2 = json.loads((ROOT / "schemas" / "clicks.avsc").read_text(encoding="utf-8"))
+    v1 = dict(v2, fields=[f for f in v2["fields"] if f["name"] != "device"])
+    subject = f"it-evolution-{uuid.uuid4().hex[:8]}-value"
+    registry("POST", f"/subjects/{subject}/versions", {"schema": json.dumps(v1)})
+    try:
+        def compatible(schema):
+            return registry("POST", f"/compatibility/subjects/{subject}/versions/latest",
+                            {"schema": json.dumps(schema)})["is_compatible"]
+
+        assert compatible(v2)                                           # optional + default: accepted
+        assert not compatible(dict(v1, fields=v1["fields"] + [{"name": "device", "type": "string"}]))
+        assert not compatible(dict(v1, fields=[f for f in v1["fields"] if f["name"] != "category"]))
+        assert not compatible(dict(v1, fields=[dict(f, type="string") if f["name"] == "event_time" else f
+                                               for f in v1["fields"]]))  # changed type
+    finally:
+        registry("DELETE", f"/subjects/{subject}")
+        registry("DELETE", f"/subjects/{subject}?permanent=true")
+
+
+def test_the_device_of_a_phone_lands_in_iceberg(stack):
+    http, conn = stack
+    user, session = f"W-it{uuid.uuid4().hex[:12]}", f"S-it{uuid.uuid4().hex[:12]}"
+    r = http.post("/api/events", headers={"User-Agent": IPHONE},
+                  json={"event_type": "page_view", "product_id": "P001", "user_id": user, "session_id": session})
+    assert r.status_code == 202, r.text
+    poll(conn, f"SELECT device FROM clicks WHERE session_id = '{session}'", [["mobile"]])
+
+
+def test_sql_playground_examples_run_on_real_trino(stack):
+    """The fake Trino accepts any SQL; every example offered in the playground must really run."""
+    from conftest import ROOT
+    tree = ast.parse((ROOT / "dashboard" / "app.py").read_text(encoding="utf-8"))
+    examples = next(ast.literal_eval(n.value) for n in tree.body
+                    if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "EXAMPLES")
+    _, conn = stack
+    for name, sql in examples.items():
+        query(conn, sql)  # raises on invalid SQL or a missing column

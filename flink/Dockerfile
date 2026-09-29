@@ -4,6 +4,8 @@ FROM flink:1.20.1-scala_2.12-java11
 ARG MVN=https://repo1.maven.org/maven2
 # Kafka source for Flink SQL
 ADD --chmod=644 ${MVN}/org/apache/flink/flink-sql-connector-kafka/3.3.0-1.20/flink-sql-connector-kafka-3.3.0-1.20.jar /opt/flink/lib/
+# Avro values + Confluent Schema Registry client (the 'avro-confluent' format)
+ADD --chmod=644 ${MVN}/org/apache/flink/flink-sql-avro-confluent-registry/1.20.1/flink-sql-avro-confluent-registry-1.20.1.jar /opt/flink/lib/
 # Iceberg sink + catalog
 ADD --chmod=644 ${MVN}/org/apache/iceberg/iceberg-flink-runtime-1.20/1.8.1/iceberg-flink-runtime-1.20-1.8.1.jar /opt/flink/lib/
 # S3FileIO (AWS SDK v2) so Iceberg can write to S3 (RustFS)

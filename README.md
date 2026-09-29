@@ -3,7 +3,8 @@
 **Kafka → Flink SQL → Apache Iceberg → Trino → Streamlit, on your laptop with one command.**
 
 **Lakeshop**, a real demo storefront with search, a cart and fake checkout, streams every click and
-order into Kafka (an optional simulator can add background traffic). Flink SQL turns them into
+order into Kafka as **Avro, checked against a Schema Registry** (an optional simulator can add
+background traffic). Flink SQL turns them into
 exactly-once Apache Iceberg tables on S3-compatible storage. Trino queries those tables, and a live
 dashboard shows revenue, the conversion funnel and top products, plus the lakehouse internals
 (snapshots, small files, compaction, time travel) that usually stay hidden. Orders consume real stock,
@@ -27,12 +28,12 @@ and an inventory view forecasts demand from the sales stream and suggests what t
 | ![Products](docs/screenshots/store-products.png) | ![Product](docs/screenshots/store-product.png) | ![Cart](docs/screenshots/store-cart.png) |
 | **Test-mode checkout** | **Declined card: no order event** | **Order placed** |
 | ![Checkout](docs/screenshots/store-checkout.png) | ![Declined](docs/screenshots/store-declined.png) | ![Success](docs/screenshots/store-success.png) |
-| **📦 Inventory: forecast + reorder suggestions** | **Lakehouse internals** | **SQL playground** |
+| **📦 Inventory: forecast + reorder suggestions** | **Lakehouse internals** | **Schema evolution: old rows NULL, new ones typed** |
 | ![Inventory](docs/screenshots/dashboard-inventory.png) | ![Internals](docs/screenshots/dashboard-internals.png) | ![SQL](docs/screenshots/dashboard-sql.png) |
 | **Dashboard, dark mode** | **Catalog admin** | **Restock and reorder settings** |
 | ![Dark](docs/screenshots/dashboard-dark.png) | ![Catalog admin](docs/screenshots/admin-catalog.png) | ![Stock dialog](docs/screenshots/admin-stock.png) |
-| **Add a product (emoji picker + live preview)** | **Search** | **Mobile store** |
-| ![Add product](docs/screenshots/admin-add.png) | ![Search](docs/screenshots/store-search.png) | <img src="docs/screenshots/store-mobile.png" width="200" alt="Mobile"> |
+| **Add a product (emoji picker + live preview)** | **Schema v2: sessions by device + the registry** | **Mobile store** |
+| ![Add product](docs/screenshots/admin-add.png) | ![Devices and schemas](docs/screenshots/dashboard-devices.png) | <img src="docs/screenshots/store-mobile.png" width="200" alt="Mobile"> |
 
 Regenerate them any time with `docker compose run --rm demo` (it sends real shopper traffic through
 the store, then captures both apps; only Docker needed).
@@ -54,6 +55,7 @@ production streaming lakehouse works:
 | **Engine interoperability** | Flink writes and Trino reads the **same** tables through the **same** catalog |
 | **Lake maintenance** | Visible small-files problem, plus one-click `OPTIMIZE` compaction from the UI |
 | **Time travel** | Query any table as of any snapshot (`FOR VERSION AS OF`) |
+| **Contracts, not hope** | Avro schemas in a Schema Registry with FULL compatibility: a breaking change is rejected before any event is produced, and a new field reaches Iceberg without rewriting a file |
 | **Operability** | Every chart shows its SQL and latency; Flink, Kafka, Trino and S3 UIs are all exposed |
 | **Transactions next to analytics** | Stock lives in the shop's database (atomic, never oversold); every stock movement streams into Iceberg, where the dashboard forecasts demand and suggests reorders |
 
@@ -64,7 +66,9 @@ production streaming lakehouse works:
 ```mermaid
 flowchart LR
     U(("🧑 Shopper")) --> S["🛒 Lakeshop<br/>FastAPI + bento UI"]
-    S -- "JSON events" --> K[("Kafka<br/>clicks · orders · inventory")]
+    S -- "Avro events" --> K[("Kafka<br/>clicks · orders · inventory")]
+    R["📜 Schema Registry<br/>FULL compatibility"] -.schemas.- S
+    R -.schemas.- F
     G["🤖 Simulator<br/>(optional)"] -.->|clicks| K
     G -.->|checkouts| S
     K --> F["Flink SQL<br/>watermarks · windows<br/>checkpoint every 10s"]
@@ -80,6 +84,7 @@ flowchart LR
 |---|---|---|
 | Produce | **FastAPI** + vanilla JS storefront | Real user events: product views, add-to-cart, checkout |
 | Ingest | **Apache Kafka 3.9** (KRaft, no ZooKeeper) | Durable, partitioned event log (3 partitions per topic) |
+| Contracts | **Confluent Schema Registry 7.9** + Avro | One schema per topic; breaking changes rejected at produce time |
 | Process | **Apache Flink 1.20** (SQL) | Streaming ETL and windowed aggregation, exactly-once |
 | Table format | **Apache Iceberg 1.8** (REST catalog on Postgres) | ACID tables, snapshots, schema evolution, time travel |
 | Storage | **RustFS** (S3 API) | Object storage for Parquet data and Iceberg metadata |
@@ -90,7 +95,7 @@ flowchart LR
 
 ```
 lakehouse.shop
-├── clicks               bronze  raw page_view / add_to_cart events    PARTITIONED BY event_date
+├── clicks               bronze  raw page_view / add_to_cart events    PARTITIONED BY event_date  (+ device, schema v2)
 ├── orders               bronze  raw orders                            PARTITIONED BY event_date
 ├── inventory_movements  bronze  every stock change (order, restock, …) PARTITIONED BY event_date
 ├── revenue_per_minute   gold    1-min tumbling window × category      orders, units, revenue
@@ -102,7 +107,7 @@ lakehouse.shop
 ## Quick start
 
 **Prerequisites:** Docker Desktop (or Docker Engine + Compose v2) with **≥ 6 GB of memory** allocated,
-and free ports 8000, 8081, 8088, 8090, 8181, 8501, 9000, 9001 and 29092.
+and free ports 8000, 8081, 8085, 8088, 8090, 8181, 8501, 9000, 9001 and 29092.
 
 ```bash
 git clone https://github.com/<you>/realtime-ecommerce-lakehouse.git
@@ -135,7 +140,8 @@ Stop it with `docker compose down`, or wipe all data with `docker compose down -
 | http://localhost:8000/admin.html | **Catalog admin**: list, search and add products (with an emoji picker), restock |
 | http://localhost:8501 | **Dashboard**: live business view, inventory, lakehouse internals, SQL playground (`?theme=dark` for dark mode) |
 | http://localhost:8081 | **Flink**: job graph, checkpoints (size and duration), backpressure, watermarks |
-| http://localhost:8088 | **Kafka UI**: topics, partitions, consumer lag, live messages |
+| http://localhost:8088 | **Kafka UI**: topics, partitions, consumer lag, live messages (Avro decoded), **Schema Registry** tab |
+| http://localhost:8085/subjects | **Schema Registry** REST API: `…/subjects/clicks-value/versions/latest`, `…/config` |
 | http://localhost:8090 | **Trino**: query history and execution plans |
 | http://localhost:9001 | **RustFS console**: browse the actual Parquet and metadata files (`admin` / `password`) |
 
@@ -188,7 +194,8 @@ in the `shop-data` volume), so added products survive restarts.
 The browser only sends product ids and quantities, so **prices, totals, ids and timestamps are set on
 the server** and a client can't tamper with them. Anonymous `user_id` (per browser) and `session_id`
 (per tab) link a shopper's views, carts and orders, which makes the dashboard's funnel and
-conversion rate real. Events use exactly the pipeline's JSON schema, so Flink needed no changes.
+conversion rate real. The server also sets each click's `device` (mobile / tablet / desktop) from the
+browser's User-Agent.
 
 **Payments are fake by design.** Only published test numbers work (`4242…` approves; `…0002` and
 `…9995` decline). Any other card number is refused, card fields opt out of browser autofill, and card
@@ -216,6 +223,25 @@ Lead time and target cover are set per product in the admin (📦). A demo **day
 (`DEMO_DAY_SECONDS`), so a few minutes of traffic show trends, stock-outs and reorders. **Restock**
 buttons call the shop's API; the dashboard itself never writes stock.
 
+### Event contracts: Avro + Schema Registry: [`schemas/`](schemas)
+Each topic has an Avro schema (`clicks.avsc`, `orders.avsc`, `inventory.avsc`), registered as
+`<topic>-value` in a **Confluent Schema Registry**. Producers serialize through it (Confluent wire
+format: magic byte, schema id, Avro binary), and Flink's `avro-confluent` format looks up each
+message's writer schema by id. Money is an exact Avro `decimal`, time is `timestamp-millis` (UTC).
+
+- **Compatibility is FULL**, not the default BACKWARD. Producers deploy before the Flink job, so the job's
+  old reader schema must read new events, and new readers old ones. BACKWARD alone would let a producer
+  drop a field that Flink would then fill with silent NULLs.
+- **Fail fast:** the shop registers all three schemas at startup, so an incompatible change stops it
+  from starting instead of failing a customer's checkout.
+- **No silent drops:** the JSON pipeline used `ignore-parse-errors`, which quietly discarded bad events.
+  Now only registered Avro gets in, and anything else stops the job loudly.
+- **Evolution, for real:** clicks **v2** added an optional `device` field. The registry accepted it
+  (nullable with a default), Iceberg added the column in place (`ALTER TABLE … ADD COLUMN`, no file
+  rewritten), and older rows read NULL. The dashboard shows them as "unknown (before v2)", and the SQL
+  playground's *Schema evolution* example shows old and new rows side by side. Integration tests prove
+  the registry rejects a required new field, a removed field and a changed type.
+
 ### Simulated traffic (optional): [`generator/generator.py`](generator/generator.py)
 Enabled with `--profile simulator`. Orders go through the shop's checkout, so simulated sales consume
 stock too. Each simulated session is a funnel: 1–5 page views, each with a 25 % chance of add-to-cart, and
@@ -231,6 +257,8 @@ event order. That's realistic, and it exercises the watermark. The Kafka produce
   Output is *append-only* (a window emits once when the watermark passes its end), which suits
   Iceberg's append commits.
 - **`EXECUTE STATEMENT SET`** submits all five `INSERT`s as a single job, so sources are shared.
+- **Avro sources** (`'format' = 'avro-confluent'`): Flink resolves each writer schema to the table's
+  columns, so fields a newer producer adds are ignored until the DDL adds them. Deploy order is safe.
 - **Offsets:** `scan.startup.mode = group-offsets` with `auto.offset.reset = earliest`. A resubmitted
   job resumes where the last checkpoint committed.
 - **Idempotent deploy:** the one-shot `flink-job` container checks the Flink REST API and refuses to
@@ -276,8 +304,12 @@ SESSIONS_PER_SEC=100 docker compose --profile simulator up -d generator   # 5x t
 # Trino CLI inside the container
 docker compose exec trino trino --catalog lakehouse --schema shop
 
-# Kafka from the host
-kafka-console-consumer --bootstrap-server localhost:29092 --topic orders
+# Kafka messages, decoded from Avro through the registry (the tool ships in the registry image)
+docker compose exec schema-registry kafka-avro-console-consumer --bootstrap-server kafka:9092 \
+  --topic orders --property schema.registry.url=http://localhost:8081
+
+# The registered schemas
+curl -s localhost:8085/subjects/clicks-value/versions/latest
 ```
 
 ```sql
@@ -311,6 +343,7 @@ ALTER TABLE orders EXECUTE optimize;
 │   └── static/                 # bento UIs, no build step: store (index.html, app.js),
 │                               #   catalog admin (admin.html, admin.js), common.js, styles.css
 ├── catalog/products.json       # 48 seed products, shared by shop and simulator
+├── schemas/                    # ★ Avro event contracts: clicks.avsc, orders.avsc, inventory.avsc
 ├── generator/
 │   └── generator.py            # optional traffic simulator (--profile simulator)
 ├── dashboard/
@@ -346,7 +379,7 @@ python -m venv .venv
 | Suite | What it proves |
 |---|---|
 | `test_catalog.py` | Catalog integrity; categories stay in sync across catalog, dashboard colors and store UI |
-| `test_contract.py` | Shop and simulator events have exactly the columns Flink reads in `pipeline.sql` |
+| `test_contract.py` | Producer events, Avro schemas and Flink's source DDL agree: names, types, and an exact Avro round trip |
 | `test_shop_api.py` | Every endpoint and payment method (card / UPI / COD), validation, price tampering, no card-data leaks |
 | `test_catalog_api.py` | Adding, validating, persisting and deleting products; a new product can be bought; ids are never reused |
 | `test_inventory_api.py` | Stock: checkout takes it, short stock is refused (409, no events), restock and settings, the ledger, migration of older databases, and a 25-thread race that must not oversell |
@@ -354,7 +387,7 @@ python -m venv .venv
 | `test_generator.py` | Simulator funnel logic |
 | `test_dashboard.py` | Dashboard run headless (Streamlit `AppTest`) against a fake Trino: KPIs, themes, SQL guard, inventory tab and its Restock button |
 | `test_storefront_e2e.py` | A real browser (Playwright + Edge) shops: search, cart, every checkout, stock limits and sold-out, server-down handling, layout |
-| `test_integration.py` | With `docker compose up`: a real order flows through Kafka → Flink → Iceberg and is queryable in Trino; lakehouse stock matches the shop |
+| `test_integration.py` | With `docker compose up`: a real order flows through Kafka → Flink → Iceberg and is queryable in Trino; lakehouse stock matches the shop; topics carry registered Avro; the registry rejects breaking changes; a phone's `device` lands in Iceberg |
 
 The integration tests skip when the stack isn't running. Start it first to verify the full pipeline.
 Browser tests use the installed Edge; set `E2E_BROWSER=chromium` after `playwright install chromium`
@@ -372,7 +405,8 @@ These are deliberate simplifications for a laptop demo, each with its production
 | Inventory events published after the DB commit | Simple; a startup snapshot re-syncs the lake | Transactional outbox (or CDC from the shop database) |
 | Single Kafka broker, RF=1 | Memory | 3+ brokers, RF=3, `min.insync.replicas=2` |
 | Manual compaction button | Makes the small-files problem visible | Scheduled `rewrite_data_files` + `expire_snapshots` + `remove_orphan_files` |
-| JSON on Kafka | Human-readable in Kafka UI | Avro / Protobuf + Schema Registry |
+| Producers auto-register schemas | One less deploy step | Register from CI with a compatibility check; `auto.register.schemas=false` |
+| A non-Avro message stops the Flink job | Loud beats silently dropping events | Dead-letter topic for undecodable messages |
 | Static demo credentials | Local only | Secrets manager, IAM roles |
 
 ## Troubleshooting
@@ -387,11 +421,12 @@ These are deliberate simplifications for a laptop demo, each with its production
 | Trino exits with code 137 | OOM-kill. Keep `trino/jvm.config` (fixed heap) and `mem_limit` together |
 | Changed `pipeline.sql` but nothing happens | The running job is kept. Cancel it in the Flink UI, then `docker compose run --rm flink-job` |
 | Dashboard slowing down after an hour or two | Small files accumulate; press **🧹 Compact now** in the Internals tab |
+| Shop exits at startup with `SchemaRegistryError` (409) | A schema change the registry rejects: new fields must be nullable with a default; never remove or retype one |
+| Flink job fails with an Avro / `Unknown magic byte` error | Something produced non-Avro to a topic (e.g. an old JSON producer). Stop it; see docs/ai/Architecture.md §8 for upgrading a pre-Avro stack |
 | Checkout says "Only N left" or "sold out" | Real: the stock ran out. Restock with 📦 in the admin, or from the dashboard's Inventory tab |
 | Restocked, but the Inventory tab still shows the old stock | Normal for ~10 s (shop → Kafka → Flink → Iceberg). If it never updates, check the Flink job |
 
 ## Roadmap ideas
-- [ ] Schema Registry + Avro, with a schema-evolution demo (`ALTER TABLE … ADD COLUMN` mid-stream)
 - [ ] Upsert (CDC) table: `customers` from Postgres via Flink CDC into an Iceberg v2 equality-delete table
 - [ ] Late-event dead-letter side output + a dashboard counter
 - [ ] Scheduled table maintenance (Airflow DAG)
@@ -401,7 +436,7 @@ These are deliberate simplifications for a laptop demo, each with its production
 
 ## Tech stack
 
-`FastAPI` · `SQLite` · `Apache Kafka 3.9` · `Apache Flink 1.20` · `Apache Iceberg 1.8.1` · `PostgreSQL 16` · `Trino 470` · `RustFS 1.0` · `Python 3.12` · `Streamlit 1.41` · `Playwright` · `Docker Compose`
+`FastAPI` · `SQLite` · `Apache Kafka 3.9` · `Confluent Schema Registry 7.9` · `Avro` · `Apache Flink 1.20` · `Apache Iceberg 1.8.1` · `PostgreSQL 16` · `Trino 470` · `RustFS 1.0` · `Python 3.12` · `Streamlit 1.41` · `Playwright` · `Docker Compose`
 
 ## License
 

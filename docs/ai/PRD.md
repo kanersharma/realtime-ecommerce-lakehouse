@@ -63,7 +63,8 @@ One command starts everything: `docker compose up -d --build`.
 ### 6.2 Pipeline
 | ID | Requirement |
 |---|---|
-| P-1 | Kafka topics `clicks` and `orders` (keyed by `user_id`) and `inventory` (keyed by `product_id`), 3 partitions each |
+| P-1 | Kafka topics `clicks` and `orders` (keyed by `user_id`) and `inventory` (keyed by `product_id`), 3 partitions each, carrying **Avro** |
+| P-7 | A Schema Registry holds each topic's schema (`schemas/*.avsc`) with **FULL** compatibility: a breaking change is rejected before any event is produced. Schemas evolve by adding optional fields (clicks v2 added `device`); Iceberg adds the column in place |
 | P-2 | Flink SQL job with 5 sinks: bronze `clicks`, `orders` and `inventory_movements`; gold `revenue_per_minute` and `funnel_per_minute` |
 | P-3 | Event-time processing: 5 s watermark and 1-minute tumbling windows |
 | P-4 | Exactly-once into Iceberg through 10 s checkpoints |
@@ -79,6 +80,7 @@ One command starts everything: `docker compose up -d --build`.
 | D-4 | SQL playground, read-only (`SELECT/WITH/SHOW/DESCRIBE/EXPLAIN` only), with examples |
 | D-5 | Light and dark themes, persisted in the URL (`?theme=dark`) |
 | D-6 | A friendly "waiting for data" state that points users to the store |
+| D-8 | Live tab shows sessions and conversion by device (schema v2; older events as "unknown (before v2)") and the registry's subjects and compatibility level |
 | D-7 | Inventory tab: current stock from the lakehouse, a demand forecast per product (EWMA + trend over zero-filled daily sales), safety stock, reorder point and suggested quantity from lead time and target cover, days of cover, and one-click Restock through the shop's API. Days are demo days (60 s by default) so a live demo shows the whole cycle in minutes |
 
 ### 6.4 Developer experience
@@ -96,7 +98,7 @@ One command starts everything: `docker compose up -d --build`.
 | Freshness | Event to visible in Trino in ≤ ~15 s (checkpoint 10 s + commit) |
 | Footprint | Whole stack ≤ ~5 GB RAM; Docker Desktop needs ≥ 6 GB allocated |
 | Startup | Pipeline running within ~2 min of `up` (after images are cached) |
-| Correctness | No duplicate or partial rows (exactly-once); the server sets prices and totals; stock never goes negative, even under concurrent checkouts |
+| Correctness | No duplicate or partial rows (exactly-once); the server sets prices and totals; stock never goes negative, even under concurrent checkouts; no event is dropped silently (registered Avro only, no "ignore parse errors") |
 | Security | Demo credentials only; card data never stored, logged or emitted; read-only SQL playground |
 | Accessibility | Keyboard-operable store (native `<dialog>`, focus states), labelled inputs, colour never the only signal |
 | Portability | Works on Windows, macOS and Linux (LF line endings enforced for mounted files) |
@@ -108,5 +110,5 @@ One command starts everything: `docker compose up -d --build`.
 
 ## 9. Open questions and future scope
 See [Phases.md](Phases.md) §2: inventory follow-ups (stock in transit, a transactional outbox),
-Schema Registry/Avro, CDC upserts, late-event handling, scheduled table maintenance, a production
+CDC upserts, late-event handling, scheduled table maintenance, a production
 catalog server, data-quality checks, CI, Kubernetes, and a hosted demo.

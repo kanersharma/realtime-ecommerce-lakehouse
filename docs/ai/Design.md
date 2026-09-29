@@ -77,6 +77,11 @@ tiles for friendliness.
   (from bronze) are 40 % opacity with dashed outlines, explained by a caption. Axis labels use
   `labelOverlap="greedy"` so they never collide.
 - **SQL disclosure**: `show_sql()` renders an expander "🔍 SQL · N ms · N rows" using `code()`.
+- **Live tab, bottom row (schema v2):** "Sessions by device" (tag `LAST 15 MIN · SCHEMA V2`): pink
+  horizontal bars per device with a direct label "sessions · share that ordered", and a caption explaining that
+  `device` arrived in v2 ("unknown (before v2)" for older events). Next to it, "Event schemas" (tag
+  `SCHEMA REGISTRY`): one line per subject with its version count, and the compatibility level in a
+  caption. If the registry is down, the card says so instead of failing.
 - **📦 Inventory tab**: five KPI tiles (Reorder now = out of stock + at/below the reorder point, Out of
   stock, Stock value, Units sold · 7 days, 1 demo day), then:
   - **Reorder suggestions** (tag `FORECAST · EWMA + TREND`): up to 6 products in a 3-column grid, each
@@ -157,7 +162,8 @@ tiles for friendliness.
 - The layout has no horizontal scroll at 375, 768 or 1440 px (tested).
 
 ## 7. Screenshots
-`docker compose run --rm demo` (or `scripts/demo.py` locally) captures 17 images into `docs/screenshots/`:
+`docker compose run --rm demo` (or `scripts/demo.py` locally) captures 18 images into `docs/screenshots/`:
 store and admin at 1440×900 plus mobile at 390 px @2x; dashboard at 1440×1500 in light, dark,
-inventory, internals and SQL. Review every image before committing,
+inventory, internals, SQL (the schema-evolution example) and the device/registry row
+(`dashboard-devices`). Review every image before committing,
 because screenshots on real data have exposed real bugs (see Memory.md).

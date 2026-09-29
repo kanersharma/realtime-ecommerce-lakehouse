@@ -11,9 +11,11 @@
   POST   /api/checkout                  fake payment, stock reserved atomically,
                                         one order per line                   -> `orders` + `inventory`
 
-Event fields and the UTC 'yyyy-MM-dd HH:mm:ss.SSS' timestamp format match flink/sql/pipeline.sql.
-The browser only sends product ids and quantities: prices, totals, ids, stock and timestamps are set
-here, so the client can't tamper with them.
+Events are Avro (schemas/*.avsc), registered in the Schema Registry, whose FULL compatibility rule
+rejects breaking changes; the shop registers all three schemas at startup, so an incompatible schema
+stops it from starting instead of failing a checkout. The browser only sends product ids and
+quantities: prices, totals, ids, stock, timestamps and the device are set here, so the client can't
+tamper with them.
 
 Stock: the shop is the system of record. Checkout reserves every line in one SQLite write
 transaction (all or nothing), so stock never goes negative and orders beyond it get 409. Every stock
@@ -31,16 +33,20 @@ import uuid
 from collections import Counter
 from contextlib import asynccontextmanager, contextmanager
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 HERE = Path(__file__).resolve().parent
 # Seed catalog. Repo: catalog/products.json; container: /catalog/products.json (mounted by compose).
 SEED = HERE.parent / "catalog" / "products.json"
+# Event schemas (the contract with Flink). Repo: schemas/; container: /schemas (mounted by compose).
+SCHEMAS = HERE.parent / "schemas"
+TOPICS = ["clicks", "orders", "inventory"]
 
 CATEGORIES = ["Beauty", "Books", "Electronics", "Fashion", "Home", "Sports"]
 BADGES = ["Bestseller", "New", "Deal"]
@@ -403,11 +409,22 @@ def authorize(p: Payment, today=None):
     return TEST_CARDS[number]
 
 
-def click_event(e: Event, at):
+def device_of(user_agent):
+    """mobile | tablet | desktop from the User-Agent, the usual analytics heuristic."""
+    # ponytail: iPads in desktop mode send a Mac User-Agent and count as desktop; a real UA parser
+    # (or client hints) if device accuracy ever matters.
+    if "iPad" in user_agent or "Tablet" in user_agent or ("Android" in user_agent and "Mobile" not in user_agent):
+        return "tablet"
+    if "Mobi" in user_agent or "iPhone" in user_agent:
+        return "mobile"
+    return "desktop"
+
+
+def click_event(e: Event, at, user_agent):
     p = product(e.product_id)
     return {"event_id": uuid.uuid4().hex, "session_id": e.session_id, "user_id": e.user_id,
             "event_type": e.event_type, "product_id": p["id"], "category": p["category"],
-            "event_time": ts(at)}
+            "event_time": ts(at), "device": device_of(user_agent)}
 
 
 def order_events(c: Checkout, at):
@@ -426,22 +443,49 @@ def order_events(c: Checkout, at):
     return events
 
 
-# ---------------------------------------------------------------- Kafka
-_producer = None
+# ---------------------------------------------------------------- Kafka (Avro + Schema Registry)
+def to_avro(event, ctx=None):
+    """Event dict -> Avro record: the timestamp string becomes a datetime (timestamp-millis, UTC) and
+    money a Decimal (Avro decimal, exact). Event dicts stay JSON-friendly for the API and dry runs."""
+    record = dict(event, event_time=datetime.strptime(event["event_time"], "%Y-%m-%d %H:%M:%S.%f"))
+    for money in ("unit_price", "total_amount"):
+        if money in record:
+            record[money] = Decimal(str(record[money]))
+    return record
+
+
+_kafka = None
+
+
+def kafka():
+    """(producer, {topic: serializer}), created once. Registers every schema first, so the registry's
+    compatibility check fails the shop's startup, not a customer's checkout."""
+    global _kafka
+    if _kafka is None:
+        from confluent_kafka import Producer
+        from confluent_kafka.schema_registry import Schema, SchemaRegistryClient
+        from confluent_kafka.schema_registry.avro import AvroSerializer
+        registry = SchemaRegistryClient({"url": os.getenv("SCHEMA_REGISTRY_URL", "http://schema-registry:8081")})
+        serializers = {}
+        for topic in TOPICS:
+            schema = (SCHEMAS / f"{topic}.avsc").read_text(encoding="utf-8")
+            registry.register_schema(f"{topic}-value", Schema(schema, "AVRO"))
+            serializers[topic] = AvroSerializer(registry, schema, to_avro)
+        producer = Producer({"bootstrap.servers": os.environ["KAFKA_BOOTSTRAP"],
+                             "enable.idempotence": True, "linger.ms": 5})
+        _kafka = producer, serializers
+    return _kafka
 
 
 def publish(topic, key, event):
-    """Produce to Kafka, or print when KAFKA_BOOTSTRAP is unset (running the UI without the stack)."""
-    global _producer
-    bootstrap = os.getenv("KAFKA_BOOTSTRAP")
-    if not bootstrap:
+    """Produce Avro to Kafka, or print JSON when KAFKA_BOOTSTRAP is unset (the UI without the stack)."""
+    if not os.getenv("KAFKA_BOOTSTRAP"):
         print(f"[dry-run] {topic}: {json.dumps(event)}", flush=True)
         return
-    if _producer is None:
-        from confluent_kafka import Producer
-        _producer = Producer({"bootstrap.servers": bootstrap, "enable.idempotence": True, "linger.ms": 5})
-    _producer.produce(topic, key=key, value=json.dumps(event))
-    _producer.poll(0)
+    from confluent_kafka.serialization import MessageField, SerializationContext
+    producer, serializers = kafka()
+    producer.produce(topic, key=key, value=serializers[topic](event, SerializationContext(topic, MessageField.VALUE)))
+    producer.poll(0)
 
 
 def publish_all(events):
@@ -507,8 +551,8 @@ def catalog_options():
 
 
 @app.post("/api/events", status_code=202)
-def track(e: Event):
-    publish("clicks", e.user_id, click_event(e, now()))
+def track(e: Event, request: Request):
+    publish("clicks", e.user_id, click_event(e, now(), request.headers.get("user-agent", "")))
     return {"ok": True}
 
 

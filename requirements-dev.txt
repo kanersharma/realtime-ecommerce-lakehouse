@@ -5,5 +5,7 @@ fastapi==0.115.6
 uvicorn==0.34.0
 streamlit==1.41.1            # streamlit.testing.v1.AppTest for the dashboard
 trino==0.331.0
+fastavro==1.9.7              # Avro contract tests (same version as the producers)
+confluent-kafka==2.6.1       # integration tests read the topics' raw bytes
 playwright==1.49.1           # browser end-to-end tests of the storefront
 greenlet<3.2                 # playwright dependency; newer versions have no Python 3.9 wheels

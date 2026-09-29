@@ -52,6 +52,9 @@ class FakeTrino:
         if "inventory_movements" in sql and "regr_slope" in sql:
             return ["product_id", "product_name", "category", "on_hand", "unit_price", "lead_time_days",
                     "target_cover_days", "history_days", "level", "trend", "sigma", "avg_per_day", "sold_7d"], inventory
+        if "coalesce(max(device)" in sql:
+            return ["device", "sessions", "converted"], [("desktop", 120, 40), ("mobile", 90, 18),
+                                                          ("unknown (before v2)", 10, 1)]
         if "sum(quantity) AS units" in sql and "product_id = 'P" in sql:
             return ["age", "units"], [(age, age % 4) for age in range(14, 0, -1)]
         if "count_if(event_time >" in sql:
@@ -78,9 +81,15 @@ class FakeTrino:
         return ["order_id", "product_name"], [("a1b2", "4K Monitor")]
 
 
+def unreachable(*args, **kwargs):
+    raise urllib.error.URLError("no network in unit tests")
+
+
 @pytest.fixture
 def fake(monkeypatch):
     def make(fail=False, inventory=None):
+        monkeypatch.setenv("SCHEMA_REGISTRY_URL", "http://127.0.0.1:9")  # never a live registry...
+        monkeypatch.setattr(urllib.request, "urlopen", unreachable)     # ...and no slow connect attempts
         conn = FakeTrino(fail, inventory)
         monkeypatch.setattr(trino.dbapi, "connect", lambda **kw: conn)
         st.cache_resource.clear()  # conn() is cached across runs
@@ -170,6 +179,9 @@ def test_internals_tab_and_compaction(fake):
     ("DROP TABLE orders", False),
     ("DELETE FROM orders", False),
     ("", False),
+    ("-- newest first\nSELECT * FROM orders", True),     # a leading comment is fine...
+    ("-- looks harmless\nDROP TABLE orders", False),   # ...and can't smuggle a write past the guard
+    ("-- only a comment", False),
 ])
 def test_sql_playground_is_read_only(fake, sql, ok):
     conn = fake()
@@ -180,6 +192,22 @@ def test_sql_playground_is_read_only(fake, sql, ok):
     ran = any(q.strip() == sql.strip().rstrip(";") for q in conn.queries) if sql.strip() else False
     assert ran == ok
     assert (len(at.error) == 0) == ok
+
+
+def test_every_playground_example_passes_the_guard_and_runs(fake):
+    """Examples go through the same Run button as typed SQL (the real-Trino integration test
+    skips the guard, so it couldn't see an example the guard refused)."""
+    conn = fake()
+    at = run()
+    def box():  # widgets must be looked up again after every run
+        return next(s for s in at.selectbox if s.label == "Start from an example")
+
+    names = box().options
+    for name in names:
+        box().set_value(name).run()
+        next(b for b in at.button if b.label == "▶ Run").click().run()
+        assert not at.exception and len(at.error) == 0, name
+        assert any("rows ·" in c.value for c in at.caption), name
 
 
 # ------------------------------------------------ 📦 Inventory tab
@@ -270,3 +298,35 @@ def test_picked_product_survives_a_refresh_that_reorders_products(fake):
     assert not at.exception
     assert at.selectbox(key="inv_product").value == "Wireless Earbuds"
 
+
+# ------------------------------------------------ schema v2: device, and the registry card
+def test_sessions_by_device_show_conversion_and_pre_v2_rows(fake):
+    fake()
+    at = run()
+    assert not at.exception
+    assert any("added to the click schema in v2" in c.value for c in at.caption)
+
+
+def test_registry_card_lists_subjects_and_the_compatibility_rule(fake, monkeypatch):
+    fake()
+    answers = {"/config": {"compatibilityLevel": "FULL"},
+               "/subjects": ["orders-value", "clicks-value", "inventory-value"],
+               "/subjects/clicks-value/versions": [1, 2], "/subjects/orders-value/versions": [1],
+               "/subjects/inventory-value/versions": [1]}
+
+    def urlopen(url, timeout):
+        return io.BytesIO(json.dumps(answers[url.split(":9", 1)[1]]).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    at = run()
+    assert not at.exception
+    text = " ".join(m.value for m in at.markdown)
+    assert "`clicks-value` · 2 version(s)" in text and "`orders-value` · 1 version(s)" in text
+    assert any("Compatibility **FULL**" in c.value for c in at.caption)
+
+
+def test_registry_card_survives_a_missing_registry(fake):
+    fake()
+    at = run()
+    assert not at.exception
+    assert any("Schema Registry not reachable" in c.value for c in at.caption)

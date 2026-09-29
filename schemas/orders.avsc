@@ -1,0 +1,20 @@
+{
+  "type": "record",
+  "name": "Order",
+  "namespace": "lakeshop.events",
+  "doc": "One order line (the grain of lakehouse.shop.orders). Topic `orders`, key = user_id.",
+  "fields": [
+    {"name": "order_id", "type": "string"},
+    {"name": "session_id", "type": "string"},
+    {"name": "user_id", "type": "string"},
+    {"name": "product_id", "type": "string"},
+    {"name": "product_name", "type": "string"},
+    {"name": "category", "type": "string"},
+    {"name": "quantity", "type": "int"},
+    {"name": "unit_price", "type": {"type": "bytes", "logicalType": "decimal", "precision": 10, "scale": 2}},
+    {"name": "total_amount", "type": {"type": "bytes", "logicalType": "decimal", "precision": 12, "scale": 2}},
+    {"name": "country", "type": "string"},
+    {"name": "payment_method", "type": "string", "doc": "card | upi | cod"},
+    {"name": "event_time", "type": {"type": "long", "logicalType": "timestamp-millis"}, "doc": "UTC"}
+  ]
+}

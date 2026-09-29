@@ -1,3 +1,4 @@
 fastapi==0.115.6
 uvicorn==0.34.0
-confluent-kafka==2.6.1
+confluent-kafka[avro]==2.6.1  # + Schema Registry client, AvroSerializer
+fastavro==1.9.7

@@ -11,12 +11,17 @@ sys.path[:0] = [str(ROOT / "shop"), str(ROOT / "generator"), str(ROOT / "dashboa
 import main as shop  # noqa: E402  (shop/main.py)
 
 
-def source_columns(table):
-    """Column names of a Kafka source table in flink/sql/pipeline.sql (the event contract)."""
+def source_types(table):
+    """{column: SQL type} of a Kafka source table in flink/sql/pipeline.sql (the event contract)."""
     sql = (ROOT / "flink" / "sql" / "pipeline.sql").read_text(encoding="utf-8")
     body = re.search(rf"CREATE TEMPORARY TABLE {table} \((.*?)\) WITH", sql, re.S).group(1)
-    return {line.split()[0] for line in body.strip().splitlines()
-            if line.strip() and not line.strip().startswith(("WATERMARK", "--"))}
+    lines = [line.split("--")[0].strip().rstrip(",") for line in body.splitlines()]
+    return {line.split(None, 1)[0]: line.split(None, 1)[1] for line in lines
+            if line and not line.startswith("WATERMARK")}
+
+
+def source_columns(table):
+    return set(source_types(table))
 
 
 @pytest.fixture(autouse=True, scope="session")

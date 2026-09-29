@@ -15,7 +15,8 @@
 | 6 | Screenshots, demo guide, real-data fixes | `5b283ea` | 2026-09-28 |
 | 7 | AI reference docs (this folder) | `b6fee8a` | 2026-09-28 |
 | 8 | Catalog management, reviews, Postgres catalog | `4a03290`, `47591c5` | 2026-09-28 |
-| 9 | Inventory and demand forecasting; Docker toolbox | see `git log` | 2026-09-28 |
+| 9 | Inventory and demand forecasting; Docker toolbox | `fa5d9b5` | 2026-09-28 |
+| 10 | Schema Registry + Avro, schema evolution | see `git log` | 2026-09-29 |
 
 ### Phase 1: Streaming lakehouse core
 Kafka → Flink SQL → Iceberg (REST catalog) → Trino → Streamlit, plus a Python simulator.
@@ -95,6 +96,42 @@ Decisions by the owner: orders beyond stock are **rejected** (no back-orders), t
 - Tests: `test_inventory_api.py`, `test_inventory_plan.py`, and inventory cases in the dashboard, e2e,
   contract, generator and integration suites (217 tests in total).
 
+### Phase 10: Schema Registry + Avro, with schema evolution
+> **Delivered.** Owner's decisions: Confluent Schema Registry (`cp-schema-registry`).
+
+Goal: events are Avro, validated against registered schemas when they are produced, instead of JSON
+that Flink parses leniently (`json.ignore-parse-errors` drops bad events silently today).
+
+- **Schemas are the contract:** `schemas/clicks.avsc`, `orders.avsc`, `inventory.avsc`. Producers
+  (shop, simulator) serialize with them; Flink reads with `avro-confluent`; tests tie producers →
+  schemas → Flink DDL together.
+- **Registry** in compose (heap capped), compatibility **FULL**: producers deploy before the Flink job,
+  so the job's old reader schema must read new events (forward), and new readers old events
+  (backward). BACKWARD alone would allow removing a field, which Flink would turn into silent NULLs.
+  Kafka UI shows schemas and decodes Avro messages.
+- **Evolution demo:** clicks v2 adds optional `device` (mobile / tablet / desktop, derived by the shop
+  from the User-Agent). Iceberg gets `ADD COLUMN device` in place (no rewrite); old rows read NULL and
+  the dashboard labels them "before v2".
+- **Cutover for existing stacks** without data loss: stop producers, let Flink drain the JSON, cancel
+  the job, add the column, start the Avro pipeline (it resumes from committed offsets).
+
+✅ Done when:
+1. All three topics carry Avro (magic byte 0 + schema id) and the registry lists `clicks-value`,
+   `orders-value`, `inventory-value` with compatibility FULL.
+2. A contract test fails if a producer's event, a schema and the Flink DDL disagree.
+3. Integration tests against the live registry: an optional field with a default is accepted; a
+   required new field, a removed field and a changed type are rejected.
+4. A click from a phone lands in Iceberg with `device = 'mobile'`; rows from before v2 are NULL; the
+   dashboard shows sessions by device.
+5. The owner's existing stack is migrated with no lost events (counts before/after match).
+6. Full suite green locally and in the toolbox; screenshots and docs updated.
+
+What shipped, beyond the list above: the SQL playground's *Schema evolution* example, a
+`dashboard-devices` screenshot, `in_stock()` for integration tests, and fixes the demo run exposed (the
+playground guard refused commented SQL; the dashboard container lacked the registry URL). The owner's
+stack was migrated: 20,433 pre-Avro clicks read `device = NULL`, exactly the count before the cutover.
+Tests: 242 (contract, device, registry, Avro wire format, every playground example through the UI).
+
 ## 2. Roadmap (not started)
 Ordered roughly by value. Each item lists acceptance criteria; per R-TEST, every item
 also ships with tests.
@@ -115,12 +152,6 @@ also ships with tests.
   Chromium on ubuntu-latest).
 - A separate job, or a nightly run, boots `docker compose` and runs `test_integration.py`.
 - ✅ Done when: a README badge is green and a PR with a broken contract fails CI.
-
-### 2.2 Schema Registry + Avro, with a schema-evolution demo
-- Confluent-compatible registry (e.g. Apicurio or Karapace) in compose; the shop produces Avro; Flink
-  reads with `avro-confluent`.
-- Demo: add an optional field (e.g. `device`) mid-stream; `ALTER TABLE … ADD COLUMN` in Iceberg; no restart of readers.
-- ✅ Done when: old and new events coexist, and the dashboard shows the new column.
 
 ### 2.3 CDC upsert table
 - Postgres `customers` table → Flink CDC → Iceberg v2 table with a primary key (equality deletes).

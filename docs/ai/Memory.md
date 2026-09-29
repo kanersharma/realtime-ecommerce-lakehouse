@@ -18,6 +18,38 @@
 
 ## 2. Decision and incident log (newest first)
 
+### 2026-09-29 · Schema Registry + Avro (Phase 10)
+- **Owner decisions:** Avro with the **Confluent Schema Registry** (`cp-schema-registry`, over Karapace
+  and Apicurio); the next phase after inventory was chosen over CI and table maintenance.
+- **Found while planning:** the JSON sources had `json.ignore-parse-errors = 'true'`, so a malformed or
+  renamed field was dropped silently. Avro removes that option on purpose (Rules R-EVT-6).
+- **FULL, not BACKWARD:** producers deploy before the Flink job, so the job's old reader schema must read
+  new events. BACKWARD would allow removing a field, which Flink's reader turns into silent NULLs.
+- **Avro enums can't be used:** Flink reads STRING, and Avro can't resolve a writer enum to a string.
+- **Kafka has no volume:** `docker compose down` empties the topics (and `_schemas`). That made the
+  owner's JSON → Avro cutover trivial: after an idle `down`, nothing unconsumed was left. The shop
+  re-registers its schemas at startup, so the registry refills itself.
+- **Cutover on the owner's stack, verified:** before: 20,433 clicks, 2,292 orders, 1,869 stock
+  movements, $205,852.81. `ALTER TABLE clicks ADD COLUMN IF NOT EXISTS device varchar` (Trino) added the
+  column in place: all 20,433 rows NULL, no rewrite. After `up -d --build`, an iPhone click landed as
+  `device = 'mobile'`, and the old counts were unchanged.
+- **The first checkpoint failed once** ("triggering task is not being executed"): it fired while the
+  tasks were still deploying. Harmless; `restored` stayed 0.
+- **Windows: connecting to a closed localhost port takes ~2 s.** Pointing the dashboard's registry URL
+  at a closed port in unit tests quadrupled their time (103 s); stubbing `urlopen` brought it to 25 s.
+- **The demo run caught two bugs the suite missed.** (1) The playground refused the new *Schema
+  evolution* example: it starts with a `--` comment, and the read-only guard only looked at the first
+  word. The real-Trino test ran the examples straight against Trino, skipping the guard. **Now:** the
+  guard ignores comment lines, and a UI test runs every example through the Run button. (2) The
+  dashboard container had no `SCHEMA_REGISTRY_URL`, so its registry card said "not reachable": the
+  tests run the dashboard from the host or the toolbox, where the URL works. **Now:** a test checks that
+  every service whose code reads the variable gets it from compose.
+- **An integration test assumed stock it didn't own:** it bought 3 × P021, and after hours of demo
+  traffic P021 was sold out, so the shop rightly answered 409. **Now:** tests that buy seed products
+  top up that stock first through the shop's restock API (`in_stock()`).
+- **Heredocs mangle backslash escapes** in Git Bash edit scripts (a `\n` inside a string became a real
+  newline, three times). Write edit scripts with the Write tool, or avoid escape sequences in heredocs.
+
 ### 2026-09-28 · Inventory and demand forecasting (Phase 9); Docker toolbox
 - **Owner decisions:** orders beyond stock are **rejected** (no back-orders), the forecast is **EWMA +
   linear trend**, and the Docker work is a **toolbox image** for tests and the demo.
@@ -163,7 +195,7 @@
 
 ## 3. Useful facts
 - End-to-end latency is ~7–15 s. Gold windows appear ~65 s after a minute starts.
-- Stack memory is ~4.5–5 GB. Test suite: 217 tests, ~7 min locally, ~4.5 min in the toolbox.
+- Stack memory is ~5 GB (the registry adds ~300 MB). Test suite: 237 tests, ~7 min locally.
 - Test cards: `4242 4242 4242 4242` approves; `4000 0000 0000 0002` and `4000 0000 0000 9995` decline.
 - The shop without Docker: `cd shop && uvicorn main:app --port 8000` prints events (dry run).
 - Recreate screenshots: `docker compose run --rm demo` (or `.venv/Scripts/python scripts/demo.py`);

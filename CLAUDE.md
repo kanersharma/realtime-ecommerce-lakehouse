@@ -4,7 +4,7 @@ Context for AI coding assistants working on this repository. Read this before ch
 
 ## What this is
 A local, Docker Compose–based **streaming lakehouse** project:
-`Lakeshop storefront (FastAPI + bento UI) → Kafka → Flink SQL → Apache Iceberg (REST catalog, S3 on RustFS) → Trino → Streamlit`.
+`Lakeshop storefront (FastAPI + bento UI) → Kafka (Avro + Schema Registry) → Flink SQL → Apache Iceberg (REST catalog, S3 on RustFS) → Trino → Streamlit`.
 An optional simulator (`generator/`) can add background traffic. The shop also owns product **stock**
 (SQLite); every stock movement streams to Iceberg, and the dashboard's 📦 Inventory tab forecasts demand
 and suggests reorders.
@@ -32,15 +32,15 @@ end to end before making the final change (commit, push, or saying "done").** Co
    | File | Covers |
    |---|---|
    | `test_catalog.py` | catalog integrity; the 6 categories stay in sync across catalog, dashboard and shop UI |
-   | `test_contract.py` | shop and simulator events have exactly the columns in `pipeline.sql` |
-   | `test_shop_api.py` | every endpoint and payment method (card/UPI/COD), validation, price tampering, no card-data leaks |
+   | `test_contract.py` | producer events == Avro schemas (`schemas/*.avsc`) == Flink source DDL: names, types, Avro round trip |
+   | `test_shop_api.py` | every endpoint and payment method (card/UPI/COD), validation, price tampering, no card-data leaks, device from User-Agent |
    | `test_catalog_api.py` | add/list/validate/persist/delete products, reviews rules; a new product can be bought; ids never reused |
    | `test_inventory_api.py` | stock: checkout takes it, 409 when short (no events), restock/settings, ledger, migration, no-oversell race |
    | `test_inventory_plan.py` | forecast + reorder math in `dashboard/inventory.py`, SQL builders and their injection guard |
    | `test_generator.py` | simulator funnel logic |
-   | `test_dashboard.py` | dashboard via Streamlit `AppTest` with a fake Trino: KPIs, themes, waiting state, SQL guard, Inventory tab (plan, Restock button, product picker) |
+   | `test_dashboard.py` | dashboard via Streamlit `AppTest` with a fake Trino (network stubbed): KPIs, themes, waiting state, SQL guard, Inventory tab (plan, Restock button, product picker), device and registry cards |
    | `test_storefront_e2e.py` | real browser (Playwright + Edge): search, cart, all checkouts, server-down message, layout, catalog admin (add → view → buy, validation, delete), stock limits and sold-out, non-secure context |
-   | `test_integration.py` | running stack: real orders (including an admin-added product) land in Iceberg; dashboard SQL runs on real Trino; lakehouse stock matches the shop |
+   | `test_integration.py` | running stack: real orders (including an admin-added product) land in Iceberg; dashboard SQL and every playground example run on real Trino; lakehouse stock matches the shop; topics carry registered Avro; the registry accepts only FULL-compatible changes; a phone's `device` lands in Iceberg |
 2. **Run the whole suite**, not just the file you touched:
    ```bash
    python -m venv .venv && .venv/Scripts/python -m pip install -r requirements-dev.txt   # once
@@ -49,7 +49,7 @@ end to end before making the final change (commit, push, or saying "done").** Co
    ```
    Everything must pass. A failing test is fixed or explained to the owner, never deleted to go green.
 3. **Integration tests must RUN, not skip**, for any change touching the shop, events, pipeline,
-   catalog, inventory, Trino config or docker-compose: `docker compose up -d --build`, wait for the Flink job
+   catalog, inventory, schemas, Trino config or docker-compose: `docker compose up -d --build`, wait for the Flink job
    (`curl -s localhost:8081/jobs/overview` → RUNNING), then run pytest again. A skip in
    `test_integration.py` means the pipeline was **not** verified, so say so explicitly.
 4. **Look at UI changes in a real browser** (store :8000, dashboard :8501, light and dark), including
@@ -62,8 +62,9 @@ end to end before making the final change (commit, push, or saying "done").** Co
 |---|---|---|---|
 | kafka | apache/kafka:3.9.0 | 29092 (host listener) | KRaft single node. In-network address: `kafka:9092` |
 | kafka-init | apache/kafka:3.9.0 | – | one-shot: creates topics `clicks`, `orders`, `inventory` (3 partitions) |
-| kafka-ui | kafbat/kafka-ui:v1.1.0 | 8088→8080 | optional, ~300 MB RAM |
-| shop | ./shop | 8000 | Lakeshop storefront, catalog admin (`/admin.html`) and API; produces to `clicks` / `orders` / `inventory`. Catalog **and stock** in SQLite at `SHOP_DB=/data/shop.db` (volume `shop-data`). `KAFKA_BOOTSTRAP` unset = dry run (prints events) |
+| schema-registry | confluentinc/cp-schema-registry:7.9.10 | **8085**→8081 | Avro schemas (`<topic>-value`), compatibility **FULL**, heap 256 MB; stored in Kafka's `_schemas` topic |
+| kafka-ui | kafbat/kafka-ui:v1.1.0 | 8088→8080 | optional, ~300 MB RAM; wired to the registry (schemas tab, decoded Avro) |
+| shop | ./shop | 8000 | Lakeshop storefront, catalog admin (`/admin.html`) and API; produces Avro to `clicks` / `orders` / `inventory` (registers the schemas at startup, `SCHEMA_REGISTRY_URL`). Catalog **and stock** in SQLite at `SHOP_DB=/data/shop.db` (volume `shop-data`). `KAFKA_BOOTSTRAP` unset = dry run (prints JSON) |
 | generator | ./generator | – | **opt-in**: `--profile simulator`; env `SESSIONS_PER_SEC` (default 20); orders go through the shop's checkout (`SHOP_URL`) |
 | rustfs | rustfs/rustfs:1.0.0 | 9000 (S3), 9001 (console) | creds `admin` / `password` |
 | s3-init | amazon/aws-cli | – | one-shot: creates bucket `warehouse` |
@@ -72,17 +73,19 @@ end to end before making the final change (commit, push, or saying "done").** Co
 | jobmanager / taskmanager | ./flink (lakehouse-flink:1.20) | 8081 | config via `FLINK_PROPERTIES` in the `x-flink` anchor |
 | flink-job | ./flink | – | one-shot: submits `pipeline.sql` via `sql-client.sh`, **skips if a job is already running**, exits 0 |
 | trino | trinodb/trino:470 | **8090**→8080 | catalog from `trino/catalog/lakehouse.properties`; heap pinned in `trino/jvm.config` |
-| dashboard | ./dashboard | 8501 | Streamlit, talks to `trino:8080`; Restock buttons call `SHOP_URL`; `DEMO_DAY_SECONDS` (60) |
+| dashboard | ./dashboard | 8501 | Streamlit, talks to `trino:8080`; Restock buttons call `SHOP_URL`; `DEMO_DAY_SECONDS` (60); reads the registry (`SCHEMA_REGISTRY_URL`, default `localhost:8085`) |
 | tests / demo | `.` (root `Dockerfile`, image `lakehouse-tools`) | – | **profile `tools`**, on demand: `docker compose run --rm tests` (whole suite) / `demo` (traffic + screenshots). Code is baked in: `docker compose build tests` after changes |
 
 The catalog name `lakehouse` and schema `shop` are the same in Flink and Trino. Keep them in sync.
 
 ## Key files
-- `flink/sql/pipeline.sql`: **the pipeline.** Kafka source DDL (temporary tables), Iceberg catalog,
+- `schemas/*.avsc`: **the event contract** (Avro). Mounted at `/schemas` into shop and generator.
+- `flink/sql/pipeline.sql`: **the pipeline.** Kafka source DDL (temporary tables, `avro-confluent`), Iceberg catalog,
   table DDL (`IF NOT EXISTS`), and one `EXECUTE STATEMENT SET` with 5 INSERTs.
 - `flink/Dockerfile`: connector jars added via `ADD` from Maven Central. **Versions are coupled**:
-  `flink-sql-connector-kafka-<ver>-1.20`, `iceberg-flink-runtime-1.20-<iceberg>`, and
-  `iceberg-aws-bundle-<iceberg>` must match the Flink minor (1.20) and each other.
+  `flink-sql-connector-kafka-<ver>-1.20`, `flink-sql-avro-confluent-registry-1.20.x`,
+  `iceberg-flink-runtime-1.20-<iceberg>`, and `iceberg-aws-bundle-<iceberg>` must match the Flink minor
+  (1.20) and each other.
   `flink-shaded-hadoop-2-uber` is required because Iceberg's Flink catalog references
   `org.apache.hadoop.conf.Configuration`, even with a REST catalog.
 - `trino/catalog/lakehouse.properties`: Iceberg REST + native S3 (`fs.native-s3.enabled`).
@@ -92,11 +95,12 @@ The catalog name `lakehouse` and schema `shop` are the same in Flink and Trino. 
   `CATEGORY_COLORS` (dashboard), `CATS` (`shop/static/common.js`) and `CATEGORIES`/`EMOJI` (`shop/main.py`).
 - `shop/main.py`: catalog and stock store (`connect()`, `transaction()` = `BEGIN IMMEDIATE`, `catalog()`,
   `product()`, `create_product()`, `delete_product()`, `reserve_stock()`, `restock()`,
-  `set_inventory_settings()`, `snapshot_stock()`), pure functions `authorize`, `click_event`,
-  `order_events`, `inventory_event`, and the FastAPI routes. `shop/static/`:
+  `set_inventory_settings()`, `snapshot_stock()`), pure functions `authorize`, `device_of`, `click_event`,
+  `order_events`, `inventory_event`, `to_avro`, the Kafka publisher (`kafka()`, `publish()`), and the
+  FastAPI routes. `shop/static/`:
   no-build UIs: store (`index.html`, `app.js`), catalog admin (`admin.html`, `admin.js`), shared
   helpers (`common.js`), `styles.css`.
-- `generator/generator.py`: `session_events(now, rng)` is pure and tested; `main()` does Kafka I/O.
+- `generator/generator.py`: `session_events(now, rng)` and `to_avro` are pure and tested; `main()` does Kafka I/O.
 - `tests/`: the whole test suite (pytest; config in `pytest.ini`, deps in `requirements-dev.txt`).
 - `dashboard/app.py`: all SQL is in module-level constants; `query(sql) -> (DataFrame, ms)`.
 - `dashboard/inventory.py`: the Inventory tab's logic, kept out of Streamlit so it's unit-testable:
@@ -120,6 +124,7 @@ docker compose run --rm demo                  # shopper traffic + screenshots in
 cd shop && uvicorn main:app --port 8000       # UI without Docker: events are printed (dry run)
 docker compose --profile simulator up -d      # add simulated background traffic
 curl -s localhost:8081/jobs/overview          # Flink job state
+curl -s localhost:8085/subjects               # registered schemas (and /config for the compatibility level)
 ```
 To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
 `curl -X PATCH localhost:8081/jobs/<jid>`), then `docker compose run --rm flink-job`. The guard in
@@ -133,14 +138,21 @@ To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
 4. The dashboard at :8501 shows KPIs (and the revenue chart after ~65 s).
 5. Stock: `SELECT product_id, on_hand_after FROM inventory_movements ORDER BY event_time DESC, seq DESC`
    matches `GET /api/products` (`on_hand`) within ~10 s.
+6. Schemas: `curl -s localhost:8085/subjects` lists `clicks-value`, `orders-value`, `inventory-value`, and
+   Kafka UI (:8088) shows decoded Avro messages.
 
 ## Conventions
 - All timestamps are **UTC, timezone-naive** `TIMESTAMP(3)`. The generator emits
   `yyyy-MM-dd HH:mm:ss.SSS` (Flink JSON `SQL` format); the dashboard sets the Trino session to UTC,
   so `localtimestamp` is "now in UTC". Don't introduce `TIMESTAMP_LTZ` or `Z` suffixes without changing all three.
-- **Event contract**: shop and generator emit exactly the columns declared in `pipeline.sql`
-  (`clicks_src`, `orders_src`, `inventory_src`). Adding a field means changing all three plus the Iceberg DDL.
+- **Event contract**: `schemas/*.avsc` (Avro, Schema Registry, compatibility **FULL**). Shop and generator
+  emit exactly those fields; `pipeline.sql` (`clicks_src`, `orders_src`, `inventory_src`) declares the same
+  columns and types. Add fields only as `["null", T]` with `"default": null`; never remove, rename or
+  retype (Rules R-EVT-5). Adding a field means changing the schema, both producers, the source DDL, the
+  Iceberg DDL and INSERT, and `ALTER TABLE … ADD COLUMN` on existing stacks.
   One order event per cart line: `orders` has one product per row.
+- **Event dicts stay JSON-friendly** inside the producers (string timestamps, float prices); `to_avro()`
+  converts at the serializer boundary (timestamp-millis, exact decimals). Dry runs print the JSON.
 - **The shop server owns money and identity**: prices, totals, order ids and `event_time` are set in
   `main.py` from the catalog, never taken from the browser. Validate every request with pydantic models.
 - **Payments are fake**: only the `TEST_CARDS` numbers may succeed, card inputs keep `autocomplete="off"`
@@ -201,11 +213,20 @@ To deploy a changed `pipeline.sql`, cancel the running job first (Flink UI, or
   fails on Debian 13.
 - **Tests must never touch `shop/data/shop.db`** (the developer database). The e2e server uses a temp
   `SHOP_DB`; the session guard `developer_db_untouched` fails the run if it changes.
+- **Topics carry Avro only.** The Flink sources have no "ignore parse errors": a JSON or raw message on
+  `clicks`/`orders`/`inventory` fails the job (loud beats silently dropping events). Upgrading a stack
+  from before Avro: stop producers, wait one checkpoint, `down`, `ALTER TABLE clicks ADD COLUMN device
+  varchar` in Trino, then `up -d --build` (Architecture §8).
+- **Kafka has no volume**: `docker compose down` empties topics and the registry's `_schemas` topic. The
+  shop re-registers all schemas at startup, so that's harmless; Iceberg and products persist.
+- **Avro enums don't work with Flink's string columns** (Avro can't resolve enum → string). Use `string`.
+- **Unit tests must not touch the network**: on Windows, connecting to a closed localhost port takes ~2 s,
+  which made the dashboard tests 4× slower. `test_dashboard.py` stubs `urllib.request.urlopen`.
 - **Streamlit resets a select when its options change.** Keep option lists in a stable order (the
   Inventory product picker is alphabetical, seeded via `st.session_state`), or auto-refresh throws the
   user's choice away.
 
 ## Ideas that fit the architecture
-Schema Registry + Avro; Flink CDC upsert table; late-event side output; scheduled Iceberg maintenance
+Flink CDC upsert table; late-event side output; scheduled Iceberg maintenance
 (`expire_snapshots`, `remove_orphan_files`); stock in transit and a transactional outbox for inventory
 events; data-quality checks on gold tables.

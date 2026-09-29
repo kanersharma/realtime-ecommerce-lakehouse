@@ -1,6 +1,6 @@
 -- =====================================================================
 -- Real-time e-commerce lakehouse pipeline (Flink SQL)
---   Kafka (clicks, orders)  ->  Iceberg tables in lakehouse.shop
+--   Kafka (clicks, orders, inventory; Avro + Schema Registry)  ->  Iceberg tables in lakehouse.shop
 -- Submitted once by the `flink-job` container: sql-client.sh -f pipeline.sql
 -- Every statement is idempotent (IF NOT EXISTS), so re-submitting is safe.
 -- =====================================================================
@@ -14,6 +14,10 @@ SET 'table.exec.source.idle-timeout' = '10 s';
 
 -- ---------------------------------------------------------------------
 -- 1. Sources: Kafka topics (temporary tables in Flink's in-memory catalog)
+--    Values are Avro (schemas/*.avsc). Each message names its writer schema by id; Flink fetches it
+--    from the registry and resolves it to the columns below, so fields a newer producer adds are
+--    ignored until they're added here. There is no "ignore parse errors": producers can only send
+--    what the registry accepted, and anything else should stop the job, not vanish.
 -- ---------------------------------------------------------------------
 CREATE TEMPORARY TABLE clicks_src (
     event_id    STRING,
@@ -23,6 +27,7 @@ CREATE TEMPORARY TABLE clicks_src (
     product_id  STRING,
     category    STRING,
     event_time  TIMESTAMP(3),     -- UTC, event time (not arrival time)
+    device      STRING,           -- schema v2: mobile | tablet | desktop (NULL in v1 events)
     WATERMARK FOR event_time AS event_time - INTERVAL '5' SECOND
 ) WITH (
     'connector' = 'kafka',
@@ -31,8 +36,8 @@ CREATE TEMPORARY TABLE clicks_src (
     'properties.group.id' = 'flink-lakehouse',
     'properties.auto.offset.reset' = 'earliest',
     'scan.startup.mode' = 'group-offsets',
-    'format' = 'json',
-    'json.ignore-parse-errors' = 'true'
+    'format' = 'avro-confluent',
+    'avro-confluent.url' = 'http://schema-registry:8081'
 );
 
 CREATE TEMPORARY TABLE orders_src (
@@ -56,8 +61,8 @@ CREATE TEMPORARY TABLE orders_src (
     'properties.group.id' = 'flink-lakehouse',
     'properties.auto.offset.reset' = 'earliest',
     'scan.startup.mode' = 'group-offsets',
-    'format' = 'json',
-    'json.ignore-parse-errors' = 'true'
+    'format' = 'avro-confluent',
+    'avro-confluent.url' = 'http://schema-registry:8081'
 );
 
 -- Stock movements from the shop (the system of record for stock). No windows are computed on it,
@@ -81,8 +86,8 @@ CREATE TEMPORARY TABLE inventory_src (
     'properties.group.id' = 'flink-lakehouse',
     'properties.auto.offset.reset' = 'earliest',
     'scan.startup.mode' = 'group-offsets',
-    'format' = 'json',
-    'json.ignore-parse-errors' = 'true'
+    'format' = 'avro-confluent',
+    'avro-confluent.url' = 'http://schema-registry:8081'
 );
 
 -- ---------------------------------------------------------------------
@@ -112,7 +117,8 @@ CREATE TABLE IF NOT EXISTS lakehouse.shop.clicks (
     product_id  STRING,
     category    STRING,
     event_time  TIMESTAMP(3),
-    event_date  DATE
+    event_date  DATE,
+    device      STRING   -- schema v2; stacks created before it get it via ALTER TABLE (docs/DEMO.md)
 ) PARTITIONED BY (event_date) WITH (
     'format-version' = '2',
     'write.parquet.compression-codec' = 'zstd'
@@ -183,7 +189,7 @@ BEGIN
 
 INSERT INTO lakehouse.shop.clicks
 SELECT event_id, session_id, user_id, event_type, product_id, category,
-       event_time, CAST(event_time AS DATE)
+       event_time, CAST(event_time AS DATE), device
 FROM clicks_src;
 
 INSERT INTO lakehouse.shop.orders

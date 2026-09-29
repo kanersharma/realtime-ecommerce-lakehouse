@@ -83,6 +83,16 @@ def test_simulated_orders_become_valid_shop_checkouts(sessions):
     assert bodies > 100
 
 
+def test_a_session_has_one_device_and_a_realistic_mix(sessions):
+    """Schema v2: every simulated click carries the session's device."""
+    devices = {}
+    for events in sessions:
+        clicks = [e for topic, _, e in events if topic == "clicks"]
+        assert len({e["device"] for e in clicks}) == 1
+        devices[clicks[0]["device"]] = devices.get(clicks[0]["device"], 0) + 1
+    assert set(devices) == set(generator.DEVICES) and devices["desktop"] > devices["tablet"]
+
+
 def test_simulator_only_uses_payment_methods_the_shop_accepts(sessions):
     methods = {e["payment_method"] for s in sessions for t, _, e in s if t == "orders"}
     assert methods == {"card", "upi", "cod"}

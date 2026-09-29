@@ -9,6 +9,7 @@ Clicks go straight to Kafka, backdated up to 3 s (out of order on purpose, to ex
 watermark). Orders go through the shop's checkout (SHOP_URL), because the shop owns stock: that
 keeps sales and inventory consistent, and sold-out products are refused like for real shoppers.
 Without a shop the orders go straight to Kafka (no stock is tracked then).
+Messages are Avro, in the same registered schemas as the shop's (schemas/*.avsc).
 """
 import json
 import math
@@ -19,11 +20,14 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 # Shared with the storefront (shop/), so simulated and real events use the same products.
 # Repo: catalog/products.json; container: /catalog/products.json (mounted by docker-compose).
 CATALOG = Path(__file__).resolve().parent.parent / "catalog" / "products.json"
+# Event schemas. Repo: schemas/; container: /schemas (mounted by docker-compose).
+SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
 
 
 def load_products(shop_url=None):
@@ -42,6 +46,7 @@ def load_products(shop_url=None):
 PRODUCTS = load_products()
 COUNTRIES = {"IN": 30, "US": 25, "GB": 10, "DE": 10, "BR": 8, "JP": 7, "AU": 5, "CA": 5}
 PAYMENTS = {"card": 55, "upi": 25, "cod": 20}  # the methods the shop accepts
+DEVICES = {"desktop": 50, "mobile": 42, "tablet": 8}
 PAY_WITH = {  # test credentials only: the shop refuses anything else
     "card": {"method": "card", "card_number": "4242 4242 4242 4242", "expiry": "12/30", "cvc": "123"},
     "upi": {"method": "upi", "upi_id": "simulator@okbank"},
@@ -53,8 +58,17 @@ PURCHASE_RATE = 0.40  # add_to_cart -> order
 
 
 def ts(dt):
-    """Flink SQL JSON default timestamp format: 'yyyy-MM-dd HH:mm:ss.SSS' (UTC)."""
+    """Event timestamp format, shared with the shop: 'yyyy-MM-dd HH:mm:ss.SSS' (UTC)."""
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
+def to_avro(event, ctx=None):
+    """Event dict -> Avro record (same conversion as the shop's): timestamp-millis and exact decimals."""
+    record = dict(event, event_time=datetime.strptime(event["event_time"], "%Y-%m-%d %H:%M:%S.%f"))
+    for money in ("unit_price", "total_amount"):
+        if money in record:
+            record[money] = Decimal(str(record[money]))
+    return record
 
 
 def session_events(now, rng):
@@ -67,6 +81,7 @@ def session_events(now, rng):
     user_id = f"U{rng.randint(1, 5000):05d}"
     session_id = uuid.uuid4().hex[:16]
     country = rng.choices(list(COUNTRIES), weights=list(COUNTRIES.values()))[0]
+    device = rng.choices(list(DEVICES), weights=list(DEVICES.values()))[0]
     t = now - timedelta(seconds=3)
     events = []
 
@@ -79,7 +94,7 @@ def session_events(now, rng):
         return ("clicks", user_id, {
             "event_id": uuid.uuid4().hex, "session_id": session_id, "user_id": user_id,
             "event_type": event_type, "product_id": product[0], "category": product[2],
-            "event_time": step(),
+            "event_time": step(), "device": device,
         })
 
     for _ in range(rng.randint(1, 5)):
@@ -125,7 +140,15 @@ def place_order(shop_url, body):
 
 
 def main():
-    from confluent_kafka import Producer  # imported here so tests run without Kafka
+    # imported here so tests run without Kafka
+    from confluent_kafka import Producer
+    from confluent_kafka.schema_registry import SchemaRegistryClient
+    from confluent_kafka.schema_registry.avro import AvroSerializer
+    from confluent_kafka.serialization import MessageField, SerializationContext
+
+    registry = SchemaRegistryClient({"url": os.getenv("SCHEMA_REGISTRY_URL", "http://schema-registry:8081")})
+    serialize = {t: AvroSerializer(registry, (SCHEMAS / f"{t}.avsc").read_text(encoding="utf-8"), to_avro)
+                 for t in ("clicks", "orders")}
 
     base_rate = float(os.getenv("SESSIONS_PER_SEC", "20"))
     producer = Producer({
@@ -155,7 +178,8 @@ def main():
                     if topic == "orders" and shop_url:
                         orders.append(event)
                         continue
-                    producer.produce(topic, key=key, value=json.dumps(event))
+                    producer.produce(topic, key=key, value=serialize[topic](
+                        event, SerializationContext(topic, MessageField.VALUE)))
                     sent[topic] += 1
                 if orders:
                     status = place_order(shop_url, checkout_request(orders))

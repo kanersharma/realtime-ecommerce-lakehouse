@@ -32,6 +32,12 @@ PRODUCTS = json.loads((ROOT / "catalog" / "products.json").read_text(encoding="u
 SCREENSHOT_PRODUCTS = ["P002", "P021", "P020"]  # the store screenshots buy these
 CHARTED = "Wireless Earbuds"  # P001, a bestseller: the inventory screenshot charts its daily sales
 COUNTRIES = {"IN": 30, "US": 25, "GB": 10, "DE": 10, "BR": 8, "JP": 7, "AU": 5, "CA": 5}
+USER_AGENTS = {  # the shop derives the click's `device` from these (schema v2)
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36": 45,
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1": 25,
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/126.0 Mobile Safari/537.36": 20,
+    "Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1": 10,
+}
 PAYMENTS = [
     ({"method": "card", "card_number": "4242 4242 4242 4242", "expiry": "12/30", "cvc": "123"}, 50),
     ({"method": "upi", "upi_id": "shopper@okbank"}, 25),
@@ -46,14 +52,15 @@ def shopper(http, rng):
     Returns (orders, declined, sold_out)."""
     user, session = f"W-demo{uuid.uuid4().hex[:10]}", f"S-demo{uuid.uuid4().hex[:10]}"
     ids = {"user_id": user, "session_id": session}
+    ua = {"User-Agent": rng.choices(list(USER_AGENTS), weights=list(USER_AGENTS.values()))[0]}
     cart = {}
     # bestsellers get looked at more, like a real store
     weights = [3 if p.get("badge") == "Bestseller" else 1 for p in PRODUCTS]
     for p in rng.choices(PRODUCTS, weights=weights, k=rng.randint(1, 4)):
-        http.post("/api/events", json={"event_type": "page_view", "product_id": p["id"], **ids})
+        http.post("/api/events", headers=ua, json={"event_type": "page_view", "product_id": p["id"], **ids})
         if rng.random() < 0.4:
             qty = rng.choices([1, 2, 3], weights=[75, 20, 5])[0]
-            http.post("/api/events", json={"event_type": "add_to_cart", "product_id": p["id"], **ids})
+            http.post("/api/events", headers=ua, json={"event_type": "add_to_cart", "product_id": p["id"], **ids})
             cart[p["id"]] = cart.get(p["id"], 0) + qty
     if not cart or rng.random() > 0.55:  # cart abandonment
         return 0, 0, 0
@@ -196,6 +203,11 @@ def dashboard_screenshots(browser):
         page.wait_for_timeout(2500)  # let the chart animations settle
         shoot(page, f"dashboard-{theme}")
         if theme == "light":
+            page.get_by_text("Sessions by device").first.scroll_into_view_if_needed()
+            page.get_by_text("Event schemas").first.wait_for(timeout=60_000)
+            page.get_by_text("Sessions by device").first.evaluate("e => e.scrollIntoView({block: 'start'})")
+            page.mouse.wheel(0, -40)
+            shoot(page, "dashboard-devices")
             page.get_by_role("tab", name="📦 Inventory").click()
             page.get_by_text("Reorder suggestions").wait_for(timeout=60_000)
             page.get_by_text("Days of cover").first.wait_for(timeout=60_000)
@@ -213,7 +225,7 @@ def dashboard_screenshots(browser):
             page.get_by_role("tab", name="🧪 SQL Playground").click()
             page.get_by_text("Start from an example").wait_for()
             page.get_by_label("Start from an example").click()
-            page.get_by_role("option", name="Cart abandonment by category").click()
+            page.get_by_role("option", name="Schema evolution: clicks by device").click()
             page.get_by_role("button", name="▶ Run").click()
             page.get_by_text("rows ·").wait_for(timeout=60_000)
             page.wait_for_timeout(1500)

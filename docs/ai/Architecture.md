@@ -9,7 +9,9 @@
 flowchart LR
     U(("🧑 Shopper")) -->|browser| S["🛒 Lakeshop<br/>FastAPI + static UI<br/>:8000"]
     SIM["🤖 Simulator<br/>(profile: simulator)"] -.->|optional| K
-    S -->|"produce JSON<br/>key = user_id"| K[("Kafka 3.9 (KRaft)<br/>topics: clicks · orders")]
+    S -->|"produce Avro<br/>key = user_id / product_id"| K[("Kafka 3.9 (KRaft)<br/>topics: clicks · orders · inventory")]
+    SR["Schema Registry<br/>:8085 · FULL compatibility"] -. "register / look up schemas" .- S
+    SR -. "writer schema by id" .- F
     K --> F["Flink 1.20 SQL job<br/>'ecommerce-lakehouse'<br/>watermark 5 s · checkpoint 10 s"]
     F -->|"commit per checkpoint"| I[("Iceberg 1.8 tables<br/>Parquet+zstd on RustFS (S3)")]
     RC["Iceberg REST catalog<br/>(JDBC on Postgres)"] -. table metadata .- F
@@ -27,8 +29,9 @@ flowchart LR
 | `shop` | `./shop` (python:3.12-slim, FastAPI 0.115, uvicorn) | 8000 | Storefront + catalog admin UI and API; owns the catalog (SQLite); produces events | ~60 MB |
 | `generator` | `./generator` | – | Optional simulator (`--profile simulator`) | ~15 MB |
 | `kafka` | `apache/kafka:3.9.0` (KRaft) | 29092 (host listener) | Event log; in-network `kafka:9092` | heap 512 MB |
-| `kafka-init` | `apache/kafka:3.9.0` | – | One-shot: creates `clicks`, `orders` (3 partitions, 24 h retention) | – |
-| `kafka-ui` | `kafbat/kafka-ui:v1.1.0` | 8088 | Browse topics and messages | ~300 MB |
+| `kafka-init` | `apache/kafka:3.9.0` | – | One-shot: creates `clicks`, `orders`, `inventory` (3 partitions, 24 h retention) | – |
+| `schema-registry` | `confluentinc/cp-schema-registry:7.9.10` | 8085 → 8081 | Avro schemas per topic (`<topic>-value`), compatibility FULL; stored in Kafka's `_schemas` topic | heap 256 MB |
+| `kafka-ui` | `kafbat/kafka-ui:v1.1.0` | 8088 | Browse topics, decoded Avro messages and schemas | ~300 MB |
 | `rustfs` | `rustfs/rustfs:1.0.0` | 9000 S3 / 9001 console | S3-compatible object store | ~150 MB |
 | `s3-init` | `amazon/aws-cli:2.37.4` | – | One-shot: creates bucket `warehouse` | – |
 | `postgres` | `postgres:16.4-alpine` | – | Database behind the Iceberg catalog (volume `catalog-db`) | ~40 MB |
@@ -41,7 +44,8 @@ flowchart LR
 
 Volumes: `shop-data` (the shop's catalog database, including admin-added products), `s3-data`
 (RustFS) and `catalog-db` (Postgres behind the Iceberg REST catalog). Kafka has no volume, so `down`
-loses topics while Iceberg data and products survive. `down -v` wipes everything.
+loses topics (and the registry's `_schemas` topic, re-registered by the shop at startup) while Iceberg
+data and products survive. `down -v` wipes everything.
 
 ## 3. Request and event flow (checkout)
 
@@ -55,14 +59,14 @@ sequenceDiagram
     participant T as Trino
     participant D as Dashboard
     B->>S: POST /api/events {page_view, P021, user, session}
-    S->>K: clicks ← {event_id, …, event_time (server UTC)}
+    S->>K: clicks ← Avro {event_id, …, event_time (server UTC), device (from User-Agent)}
     B->>S: POST /api/events {add_to_cart, P021}
     S->>K: clicks ← add_to_cart
     B->>S: POST /api/checkout {items:[{P021,3}], payment:{cod}}
     S->>S: authorize() → price lines from catalog
     S->>K: orders ← one event per line
     S-->>B: {order_ref, total, lines, paid_with}
-    K->>F: consume (group-offsets, earliest)
+    K->>F: consume (group-offsets, earliest); writer schema from the registry by id
     F->>I: write Parquet; on checkpoint complete → commit snapshot
     D->>T: SQL every 10 s
     T->>I: read current snapshot (REST catalog → S3)
@@ -70,12 +74,17 @@ sequenceDiagram
 ```
 
 ## 4. Event contract (the most important interface)
-Defined by the Kafka source tables in [`flink/sql/pipeline.sql`](../../flink/sql/pipeline.sql). Producers
-(`shop/main.py`, `generator/generator.py`) must emit **exactly** these fields, and `tests/test_contract.py`
-enforces it.
+Defined by the Avro schemas in [`schemas/`](../../schemas) (`clicks.avsc`, `orders.avsc`,
+`inventory.avsc`), registered in the Schema Registry as `<topic>-value`. The Kafka source tables in
+`pipeline.sql` declare the same columns and types, and producers (`shop/main.py`,
+`generator/generator.py`) emit exactly these fields. `tests/test_contract.py` ties all three together:
+names, types (STRING ↔ `string`, INT ↔ `int`, BIGINT ↔ `long`, DECIMAL(p,s) ↔ `decimal(p,s)`,
+TIMESTAMP(3) ↔ `timestamp-millis`) and a round trip through Avro.
 
 **`clicks`**: `event_id` STRING · `session_id` STRING · `user_id` STRING · `event_type` STRING
-(`page_view` | `add_to_cart`) · `product_id` STRING · `category` STRING · `event_time` TIMESTAMP(3)
+(`page_view` | `add_to_cart`) · `product_id` STRING · `category` STRING · `event_time` TIMESTAMP(3) ·
+`device` STRING, nullable (**v2**: `mobile` | `tablet` | `desktop`, derived by the shop from the
+User-Agent; NULL in events from before v2)
 
 **`orders`**: `order_id` · `session_id` · `user_id` · `product_id` · `product_name` · `category` ·
 `quantity` INT · `unit_price` DECIMAL(10,2) · `total_amount` DECIMAL(12,2) · `country` ·
@@ -87,8 +96,20 @@ enforces it.
 `target_cover_days` INT · `event_time` TIMESTAMP(3). Current stock = the latest movement per product
 (ordered by `event_time`, then `seq`).
 
-- JSON over Kafka; the timestamp format is `yyyy-MM-dd HH:mm:ss.SSS` in **UTC, timezone-naive**.
-- Message key = `user_id`, so one user's events stay ordered within a partition.
+- **Avro in the Confluent wire format** (magic byte 0, 4-byte schema id, Avro binary). Event dicts stay
+  JSON-friendly inside the producers (`event_time` as a UTC `yyyy-MM-dd HH:mm:ss.SSS` string, prices as
+  floats); `to_avro()` converts at the serializer boundary to `timestamp-millis` and exact decimals.
+  Dry-run mode prints the JSON form.
+- **Compatibility FULL** (registry-wide): each new version must read events written with the previous
+  one *and* be readable by it. Producers deploy before the Flink job, so the job's reader schema must
+  read new events (forward); new readers must read old ones (backward). In practice: add fields only
+  as nullable with a default; never remove, rename or retype a field. BACKWARD alone would allow
+  removing a field, which the Flink reader would turn into silent NULLs.
+- The shop registers all three schemas at **startup** (`kafka()`), so an incompatible schema stops the
+  shop from starting rather than failing a checkout. The simulator's serializer registers on first use.
+- Strings, not Avro enums: Avro can't resolve a writer enum to the `string` Flink reads.
+- Message key = `user_id` (`clicks`, `orders`) or `product_id` (`inventory`), plain UTF-8, so one user's
+  (or product's) events stay ordered within a partition.
 - Grain: one `orders` row per product line, not per checkout.
 - IDs: browser ids match `^[A-Za-z0-9-]{6,64}$`; store users are `W-…`, sessions `S-…`; simulator
   users are `U00001…`.
@@ -104,7 +125,7 @@ enforces it.
 | DELETE | `/api/products/{id}` | – | 204 | 403 seed product, 404 unknown |
 | PUT | `/api/products/{id}/reviews` | `{rating, reviews}` | 200: product | 403 seed product, 404 unknown, 422 (rating 1.0–5.0 with one decimal when reviews > 0; 0/0 means no reviews) |
 | GET | `/api/catalog/options` | – | 200: `{categories, emoji: {category: [..]}, badges, lead_time_days: {category: n}, target_cover_days, starting_stock}` | – |
-| POST | `/api/events` | `{event_type, product_id, user_id, session_id}` | 202 | 404 unknown product, 422 validation |
+| POST | `/api/events` | `{event_type, product_id, user_id, session_id}` + the `User-Agent` header (→ `device`) | 202 | 404 unknown product, 422 validation |
 | POST | `/api/checkout` | `{user_id, session_id, name, country, items[{product_id, quantity 1–10}] (1–20), payment{method, card_number?, expiry?, cvc?, upi_id?}}` | 200: `{order_ref, total, lines, paid_with}`; emits `orders` + `order` movements | 402 payment failed, 404 unknown product, **409 not enough stock** ("Only N left of X" / "X is sold out"), 422 validation |
 | GET | `/` (store, `?q=` prefills search), `/admin.html` (catalog admin), `common.js`, `app.js`, `admin.js`, `styles.css` | – | static UI | – |
 
@@ -132,7 +153,10 @@ is the only writer. Inventory events are published **after** commit (at-most-onc
 in between); the startup `snapshot` re-syncs the lakehouse. A transactional outbox is the upgrade path.
 
 ## 6. Flink job ([`pipeline.sql`](../../flink/sql/pipeline.sql))
-- Sources: temporary Kafka tables `clicks_src` and `orders_src`, `json.ignore-parse-errors = true`,
+- Sources: temporary Kafka tables `clicks_src`, `orders_src`, `inventory_src`, format `avro-confluent`
+  (jar `flink-sql-avro-confluent-registry`): each message's writer schema is fetched by id and
+  resolved to the table's columns, so fields a newer producer adds are ignored until the DDL adds them.
+  No "ignore parse errors": a message that isn't registered Avro fails the job instead of vanishing.
   `scan.startup.mode = group-offsets` + `auto.offset.reset = earliest`,
   `WATERMARK event_time - 5 s`, `table.exec.source.idle-timeout = 10 s`.
 - Catalog: `CREATE CATALOG lakehouse` (type iceberg, REST, S3FileIO → `http://rustfs:9000`).
@@ -140,7 +164,7 @@ in between); the startup `snapshot` re-syncs the lakehouse. A transactional outb
 
 | Table | Layer | Partitioning | Written by |
 |---|---|---|---|
-| `lakehouse.shop.clicks` | bronze | `event_date` | passthrough + `CAST(event_time AS DATE)` |
+| `lakehouse.shop.clicks` | bronze | `event_date` | passthrough + `CAST(event_time AS DATE)`; `device` is the last column (added in v2) |
 | `lakehouse.shop.orders` | bronze | `event_date` | passthrough |
 | `lakehouse.shop.revenue_per_minute` | gold | – | `TUMBLE(1 min)` by category: orders, units, revenue |
 | `lakehouse.shop.funnel_per_minute` | gold | – | `TUMBLE(1 min)`: sessions, page_views, add_to_carts |
@@ -185,6 +209,24 @@ tolerate that; see Rules R-SQL-1.
   (z = 1.65), reorder point, order-up-to, suggested quantity and status (Out of stock / Reorder now /
   Reorder soon / OK / No demand). **Restock** buttons POST to the shop (`SHOP_URL`); the new stock
   returns through Kafka → Flink → Iceberg in about 10 s.
+- **Live tab, schema v2:** "Sessions by device" (`DEVICE_SQL`: one device per session, conversion per
+  device; NULL shows as "unknown (before v2)") and "Event schemas", which reads the registry's REST API
+  (`SCHEMA_REGISTRY_URL`, read-only): subjects, version counts and the compatibility level.
+- Streamlit's stale-element fade is switched off in CSS, so auto-refresh never dims the page.
+
+### Schema evolution in practice (how `device` was added)
+1. Add the field to the `.avsc` as `["null", "string"]` with `"default": null`; the registry (FULL)
+   accepts it. The producer starts sending it; the running Flink job ignores it (its reader schema has
+   no such column), so nothing breaks while the rest catches up.
+2. Add the column to Iceberg in place: `ALTER TABLE clicks ADD COLUMN device varchar` (Trino), or
+   `CREATE TABLE IF NOT EXISTS` with it on a fresh stack. No data files are rewritten; old rows read NULL.
+3. Add the column to the Flink source DDL and INSERT, cancel the job and resubmit it; it resumes from
+   the committed offsets. Trino and the dashboard need no restart.
+
+**Upgrading a stack from before Phase 10 (JSON → Avro).** Old JSON messages must never reach the Avro
+job: stop the producers (`docker compose stop shop generator`), wait ~20 s (one checkpoint commits the
+last offsets), `docker compose down` (Kafka keeps no data across `down`), start Trino and run the
+`ALTER TABLE` above, then `docker compose up -d --build`. Iceberg data and products are kept.
 
 ## 9. Deliberate limits (with upgrade paths)
 | Limit | Why | Production path |
@@ -194,7 +236,8 @@ tolerate that; see Rules R-SQL-1.
 | No scheduled compaction; files grow ~2 per table per checkpoint | Makes the small-files problem visible | Scheduled `rewrite_data_files` (roadmap 2.5) |
 | Single Kafka broker, RF = 1 | Memory | 3+ brokers, RF = 3, `min.insync.replicas = 2` |
 | Manual compaction button | Makes the small-files problem visible | Scheduled `rewrite_data_files`, `expire_snapshots`, `remove_orphan_files` |
-| JSON events | Human-readable in Kafka UI | Avro/Protobuf + Schema Registry |
+| Producers auto-register schemas | One less deploy step | Register from CI (with a compatibility check) and set `auto.register.schemas=false` |
+| A non-Avro message stops the Flink job | Loud beats silent data loss | A dead-letter topic for undecodable messages (roadmap 2.4) |
 | Static demo credentials | Local only | Secrets manager, IAM |
 | Fake payments | Demo | A real PSP in its test mode |
 
@@ -210,6 +253,9 @@ tolerate that; see Rules R-SQL-1.
 | Checkout says "Only N left" / "sold out" | Real: stock is short (409) | Restock in the admin (📦) or the dashboard |
 | Restocked, but the Inventory tab still shows old stock | Normal for ~10 s (shop → Kafka → Flink → Iceberg) | If it never updates: Flink job, `inventory` topic in Kafka UI |
 | Trino exit 137 | OOM kill | `trino/jvm.config` heap vs `mem_limit` |
+| Shop exits at startup with a `SchemaRegistryError` (409) | A schema change the registry rejects (not FULL-compatible) | Make the new field nullable with a default; never remove or retype fields |
+| Shop can't start / events fail with a connection error to `schema-registry` | Registry down or not healthy yet | `docker compose ps schema-registry`; `curl localhost:8085/subjects` |
+| Flink job restarts with an Avro/`Unknown magic byte` error | A non-Avro message on a topic (e.g. JSON from an old producer or the console producer) | Remove the producer; skip the message by resetting the group's offset, or wait for 24 h retention |
 | Docker API returns 500 | VM out of memory (often another stack running) | `docker stats`; stop other stacks |
 
 ## 11. Repository map
@@ -217,6 +263,7 @@ tolerate that; see Rules R-SQL-1.
 shop/            main.py (API, catalog store, pure logic), static/ (index.html + app.js store,
                  admin.html + admin.js catalog admin, common.js shared helpers, styles.css), Dockerfile
 catalog/         products.json (seed catalog: 48 products)
+schemas/         clicks.avsc, orders.avsc, inventory.avsc (the event contract, registered in the registry)
 generator/       generator.py (optional simulator)
 flink/           Dockerfile (connector jars), sql/pipeline.sql
 trino/           catalog/lakehouse.properties, jvm.config

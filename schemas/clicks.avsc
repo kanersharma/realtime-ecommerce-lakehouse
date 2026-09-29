@@ -1,0 +1,18 @@
+{
+  "type": "record",
+  "name": "Click",
+  "namespace": "lakeshop.events",
+  "doc": "A storefront interaction. Topic `clicks`, key = user_id. v2 added `device`.",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "session_id", "type": "string"},
+    {"name": "user_id", "type": "string"},
+    {"name": "event_type", "type": "string", "doc": "page_view | add_to_cart"},
+    {"name": "product_id", "type": "string"},
+    {"name": "category", "type": "string"},
+    {"name": "event_time", "type": {"type": "long", "logicalType": "timestamp-millis"},
+     "doc": "UTC event time (when it happened, not when it arrived)"},
+    {"name": "device", "type": ["null", "string"], "default": null,
+     "doc": "v2: mobile | tablet | desktop, from the User-Agent. Optional, so v1 and v2 stay compatible."}
+  ]
+}

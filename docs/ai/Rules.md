@@ -11,7 +11,7 @@
 - **R-TEST-2** MUST add or update tests in the same change. A bug fix MUST include a test that fails
   without the fix.
 - **R-TEST-3** MUST prove each new test can fail: break the code on purpose, see it go red, restore.
-- **R-TEST-4** For changes touching the shop, events, pipeline, catalog, inventory, Trino config,
+- **R-TEST-4** For changes touching the shop, events, schemas, pipeline, catalog, inventory, Trino config,
   dashboard SQL or docker-compose, integration tests MUST **run, not skip**: `docker compose up -d --build`, wait
   for the Flink job to be RUNNING, then run pytest again.
 - **R-TEST-5** UI changes MUST be looked at in a real browser: store and dashboard, light and dark,
@@ -20,10 +20,18 @@
 - **R-TEST-7** Report honestly: pass/fail/skip counts, and anything not verified.
 
 ## R-EVT: Event contract
-- **R-EVT-1** Producers MUST emit exactly the columns of `clicks_src` / `orders_src` / `inventory_src` in
-  `flink/sql/pipeline.sql` (enforced by `tests/test_contract.py`).
-- **R-EVT-2** Adding or renaming a field MUST change, in one commit: `pipeline.sql` (source + Iceberg
-  DDL + INSERT), `shop/main.py`, `generator/generator.py`, the tests, and Architecture §4.
+- **R-EVT-1** The Avro schemas in `schemas/*.avsc` are the contract. Producers MUST emit exactly their
+  fields, and the Flink source tables (`clicks_src` / `orders_src` / `inventory_src`) MUST declare the
+  same columns with matching types (enforced by `tests/test_contract.py`).
+- **R-EVT-2** Adding a field MUST change, in one commit: the `.avsc`, `pipeline.sql` (source + Iceberg
+  DDL + INSERT), `shop/main.py`, `generator/generator.py`, the tests, and Architecture §4. Existing
+  stacks also need `ALTER TABLE … ADD COLUMN` on the Iceberg table (Architecture §8).
+- **R-EVT-5** Schema changes MUST be FULL-compatible (the registry enforces it): add fields only as
+  `["null", T]` with `"default": null`. NEVER remove, rename or retype a field, and don't use Avro enums
+  (Flink reads them as strings, which Avro can't resolve).
+- **R-EVT-6** Messages are Avro in the Confluent wire format, serialized through the registry. NEVER
+  produce JSON or raw bytes to `clicks` / `orders` / `inventory`: the Flink job fails on them (on
+  purpose: there is no "ignore parse errors").
 - **R-EVT-3** Timestamps MUST be UTC, timezone-naive, formatted `yyyy-MM-dd HH:mm:ss.SSS`. NEVER
   introduce `TIMESTAMP_LTZ` or a `Z` suffix without changing producers, Flink and the dashboard together.
 - **R-EVT-4** `orders` grain is one row per product line. Kafka key is `user_id`. `inventory` grain is
@@ -128,7 +136,7 @@
 - **R-OPS-3** The Iceberg catalog MUST run on Postgres (`CATALOG_URI=jdbc:postgresql://…`). NEVER go
   back to SQLite: its single-writer locking fails Flink's concurrent commits (`SQLITE_BUSY_SNAPSHOT`),
   and the job crash-loops.
-- **R-OPS-4** Host ports: 8000 shop, 8081 Flink, 8088 Kafka UI, 8090 Trino, 8181 REST, 8501 dashboard,
+- **R-OPS-4** Host ports: 8000 shop, 8081 Flink, 8085 Schema Registry, 8088 Kafka UI, 8090 Trino, 8181 REST, 8501 dashboard,
   9000/9001 RustFS, 29092 Kafka. 8080 is avoided on purpose (usually taken).
 - **R-OPS-5** Files mounted into containers are LF-only (`.gitattributes`). Don't remove it.
 - **R-OPS-6** Pin image and package versions. Never use `:latest` in compose.
