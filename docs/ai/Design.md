@@ -105,6 +105,10 @@ tiles for friendliness.
   | OK | `#7CE0C3` |
   | No demand | `#C9C9C9` |
 - **Dark mode**: sidebar toggle; the canvas data grid is inverted with `filter: invert(1) hue-rotate(180deg)`.
+- **Internals maintenance line**: under the KPI tiles, a caption "🧹 Scheduled maintenance: last compaction
+  N min ago · history kept N min"; the Snapshots tile counts all snapshots (expiry keeps it bounded).
+  "Commits over time" plots Flink's appends as the pink line and compactions (`replace`) as dashed ink
+  rules: a compaction rewrites thousands of rows and would flatten the appends into the axis.
 - **Auto-refresh never fades content**: Streamlit's stale-element fade is switched off (`[data-stale]`
   stays opaque), so a live page stays readable; the header's RUNNING indicator shows activity.
 

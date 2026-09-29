@@ -12,7 +12,7 @@
 <body>
   <div class="demo-banner">
     <strong>DEMO STORE</strong> · no real payments · every click streams to Kafka ·
-    <a href="http://localhost:8501" target="_blank" rel="noopener">open the live dashboard ↗</a>
+    <a data-link="dashboard" href="http://localhost:8501" target="_blank" rel="noopener">open the live dashboard ↗</a>
   </div>
 
   <header class="topbar">
@@ -47,8 +47,8 @@
         <p>events streamed from this browser session</p>
         <p class="muted" id="evt-last">Open a product to send your first <code>page_view</code>.</p>
         <div class="links">
-          <a href="http://localhost:8501" target="_blank" rel="noopener">Dashboard ↗</a>
-          <a href="http://localhost:8088" target="_blank" rel="noopener">Kafka UI ↗</a>
+          <a data-link="dashboard" href="http://localhost:8501" target="_blank" rel="noopener">Dashboard ↗</a>
+          <a data-link="kafka_ui" href="http://localhost:8088" target="_blank" rel="noopener">Kafka UI ↗</a>
         </div>
       </article>
 
@@ -152,11 +152,12 @@
       <h2>Order placed!</h2>
       <p id="co-summary"></p>
       <p>Your order events are on their way through Kafka → Flink → Iceberg.</p>
-      <a class="btn btn-pink" href="http://localhost:8501" target="_blank" rel="noopener">Watch it land on the dashboard ↗</a>
+      <a class="btn btn-pink" data-link="dashboard" href="http://localhost:8501" target="_blank" rel="noopener">Watch it land on the dashboard ↗</a>
     </div>
   </dialog>
 
   <div id="toast" role="status" aria-live="polite"></div>
+  <script src="config.js"></script>
   <script src="common.js"></script>
   <script src="app.js"></script>
 </body>

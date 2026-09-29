@@ -23,10 +23,12 @@ from pathlib import Path
 
 import httpx
 
+from ports import host_port  # scripts/ports.py: the environment, then .env, then the default port
+
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs" / "screenshots"
-SHOP = os.getenv("SHOP_URL", "http://localhost:8000")
-DASHBOARD = os.getenv("DASHBOARD_URL", "http://localhost:8501")
+SHOP = os.getenv("SHOP_URL", f"http://localhost:{host_port('SHOP_PORT')}")
+DASHBOARD = os.getenv("DASHBOARD_URL", f"http://localhost:{host_port('DASHBOARD_PORT')}")
 BROWSER = os.getenv("DEMO_BROWSER", "msedge")  # "chromium" = Playwright's bundled browser
 PRODUCTS = json.loads((ROOT / "catalog" / "products.json").read_text(encoding="utf-8"))
 SCREENSHOT_PRODUCTS = ["P002", "P021", "P020"]  # the store screenshots buy these

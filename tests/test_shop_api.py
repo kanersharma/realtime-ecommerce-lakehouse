@@ -168,3 +168,11 @@ def test_event_time_is_set_by_server_in_utc(client, events):
                                      "user_id": USER, "session_id": SESSION})
     t = datetime.strptime(events[0][2]["event_time"], "%Y-%m-%d %H:%M:%S.%f")
     assert abs((shop.now() - t).total_seconds()) < 5
+
+
+def test_config_js_carries_the_configured_links(client, monkeypatch):
+    r = client.get("/config.js")
+    assert r.status_code == 200 and "javascript" in r.headers["content-type"]
+    assert '"dashboard": "http://localhost:8501"' in r.text and '"kafka_ui": "http://localhost:8088"' in r.text
+    monkeypatch.setenv("DASHBOARD_LINK", "http://localhost:18501")
+    assert '"dashboard": "http://localhost:18501"' in client.get("/config.js").text

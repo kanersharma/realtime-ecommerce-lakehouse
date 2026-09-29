@@ -588,3 +588,15 @@ def test_store_works_outside_a_secure_context(browser, base_url):
     context.close()
     assert errors == []
 
+
+
+def test_links_to_the_other_uis_follow_the_configured_ports(page, base_url, monkeypatch):
+    """/config.js carries the host ports from .env, so a moved dashboard is still one click away."""
+    monkeypatch.setenv("DASHBOARD_LINK", "http://localhost:18501")
+    monkeypatch.setenv("KAFKA_UI_LINK", "http://localhost:18088")
+    page.reload()
+    for link in page.locator('a[data-link="dashboard"]').all():
+        expect(link).to_have_attribute("href", "http://localhost:18501")
+    expect(page.locator('a[data-link="kafka_ui"]')).to_have_attribute("href", "http://localhost:18088")
+    page.goto(f"{base_url}/admin.html")
+    expect(page.locator('a[data-link="dashboard"]')).to_have_attribute("href", "http://localhost:18501")

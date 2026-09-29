@@ -181,6 +181,16 @@ CREATE TABLE IF NOT EXISTS lakehouse.shop.funnel_per_minute (
     add_to_carts  BIGINT
 ) WITH ('format-version' = '2');
 
+-- Every commit (one per checkpoint) writes a new metadata.json holding the whole snapshot list, and
+-- Iceberg keeps the old ones by default: they reached 50x the size of the data. Keep the last 20.
+-- Idempotent, and it also applies to tables created before this setting. The `maintenance` service
+-- expires old snapshots, compacts small files and removes orphans (docker-compose.yml).
+ALTER TABLE lakehouse.shop.clicks SET ('write.metadata.delete-after-commit.enabled' = 'true', 'write.metadata.previous-versions-max' = '20');
+ALTER TABLE lakehouse.shop.orders SET ('write.metadata.delete-after-commit.enabled' = 'true', 'write.metadata.previous-versions-max' = '20');
+ALTER TABLE lakehouse.shop.inventory_movements SET ('write.metadata.delete-after-commit.enabled' = 'true', 'write.metadata.previous-versions-max' = '20');
+ALTER TABLE lakehouse.shop.revenue_per_minute SET ('write.metadata.delete-after-commit.enabled' = 'true', 'write.metadata.previous-versions-max' = '20');
+ALTER TABLE lakehouse.shop.funnel_per_minute SET ('write.metadata.delete-after-commit.enabled' = 'true', 'write.metadata.previous-versions-max' = '20');
+
 -- ---------------------------------------------------------------------
 -- 3. One Flink job for all five inserts (sources are shared/reused)
 -- ---------------------------------------------------------------------

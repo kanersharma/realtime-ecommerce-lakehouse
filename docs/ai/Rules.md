@@ -98,6 +98,9 @@
   upsert v2 table with a primary key; that's a design change, so discuss it first.
 - **R-FLINK-3** Connector jar versions are coupled: Kafka connector `-1.20`, `iceberg-flink-runtime-1.20`
   and `iceberg-aws-bundle` at the same Iceberg version. Keep `flink-shaded-hadoop-2-uber`.
+- **R-FLINK-5** Every Iceberg table MUST get the `ALTER TABLE … SET ('write.metadata.delete-after-commit.enabled'
+  = 'true', 'write.metadata.previous-versions-max' = '20')` line in `pipeline.sql`. Streaming commits
+  otherwise pile up metadata files forever.
 - **R-FLINK-4** To deploy a changed `pipeline.sql`: cancel the running job, then
   `docker compose run --rm flink-job`. NEVER remove the duplicate-job guard in `flink-job`.
 
@@ -132,14 +135,22 @@
 ## R-OPS: Docker and runtime
 - **R-OPS-1** In `docker-compose.yml`, keep each shell command in `command:` on one line (YAML
   folded scalars keep newlines on more-indented lines).
-- **R-OPS-2** Keep the stack under ~5 GB RAM. Trino heap (`jvm.config`) must stay well below its `mem_limit`.
+- **R-OPS-2** Keep the stack under ~5 GB RAM. Trino heap (`jvm.config`) must stay well below its `mem_limit`,
+  and the Trino image keeps only the plugins it uses (`trino/Dockerfile`): every plugin's classes cost
+  native memory, and a container at its limit stalls instead of crashing.
 - **R-OPS-3** The Iceberg catalog MUST run on Postgres (`CATALOG_URI=jdbc:postgresql://…`). NEVER go
   back to SQLite: its single-writer locking fails Flink's concurrent commits (`SQLITE_BUSY_SNAPSHOT`),
   and the job crash-loops.
-- **R-OPS-4** Host ports: 8000 shop, 8081 Flink, 8085 Schema Registry, 8088 Kafka UI, 8090 Trino, 8181 REST, 8501 dashboard,
+- **R-OPS-9** Host ports MUST be `${VAR:-default}` in compose, listed in `scripts/ports.py` and `.env.example`
+  (`tests/test_ports.py` enforces it). Anything that shows or dials a host port reads it from there
+  (`host_port()`, `*_LINK` env, `/config.js`). When a port is busy, move ours; NEVER stop the other program.
+- **R-OPS-4** Default host ports: 8000 shop, 8081 Flink, 8085 Schema Registry, 8088 Kafka UI, 8090 Trino, 8181 REST, 8501 dashboard,
   9000/9001 RustFS, 29092 Kafka. 8080 is avoided on purpose (usually taken).
 - **R-OPS-5** Files mounted into containers are LF-only (`.gitattributes`). Don't remove it.
 - **R-OPS-6** Pin image and package versions. Never use `:latest` in compose.
+- **R-OPS-8** The `maintenance` service MUST keep running (it maintains every table in `lakehouse.shop`,
+  new ones included). `SNAPSHOT_RETENTION` must stay ≥ Trino's configured minimum (10m) and far above
+  the checkpoint interval, or orphan removal could delete files Flink hasn't committed yet.
 - **R-OPS-7** The toolbox (root `Dockerfile`, compose profile `tools`) is based on
   `python:3.12-slim-bookworm`: Playwright 1.49's `install --with-deps` doesn't support Debian 13.
   Bump the base image and Playwright together. `.dockerignore` keeps `.venv`, `.git` and the developer

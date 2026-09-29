@@ -36,6 +36,11 @@ async function api(path, body, method) {
   return data;
 }
 
+// Links to the other UIs follow the ports in .env: /config.js sets window.LINKS.
+document.querySelectorAll("a[data-link]").forEach((a) => {
+  if (window.LINKS && LINKS[a.dataset.link]) a.href = LINKS[a.dataset.link];
+});
+
 function toast(msg) {
   const t = $("#toast");
   t.textContent = msg;

@@ -2,6 +2,8 @@
 #   shop (real clicks) / generator (simulated) -> Kafka (Avro + Schema Registry) -> Flink SQL
 #   -> Iceberg (REST catalog + RustFS/S3) -> Trino -> Streamlit
 # Demo credentials only (admin/password). Never reuse them outside this local stack.
+# Host ports come from .env (defaults below). A port taken by another program? Run
+# `python scripts/ports.py`: it picks free ones and writes .env. Never stop the other program.
 
 x-flink: &flink
   build: ./flink
@@ -25,12 +27,12 @@ services:
   # ---------- Streaming ----------
   kafka:
     image: apache/kafka:3.9.0
-    ports: ["29092:29092"]
+    ports: ["${KAFKA_PORT:-29092}:29092"]
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:${KAFKA_PORT:-29092}
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
@@ -59,7 +61,7 @@ services:
   # because producers deploy before the Flink job that reads them.
   schema-registry:
     image: confluentinc/cp-schema-registry:7.9.10
-    ports: ["8085:8081"]  # host 8085: 8081 is Flink's UI
+    ports: ["${REGISTRY_PORT:-8085}:8081"]  # not 8081 on the host: that's Flink's UI
     depends_on: { kafka: { condition: service_healthy } }
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
@@ -74,7 +76,7 @@ services:
 
   kafka-ui:
     image: kafbat/kafka-ui:v1.1.0
-    ports: ["8088:8080"]
+    ports: ["${KAFKA_UI_PORT:-8088}:8080"]
     depends_on: { kafka: { condition: service_healthy } }
     environment:
       KAFKA_CLUSTERS_0_NAME: local
@@ -84,7 +86,7 @@ services:
   # The demo storefront: real clicks -> Kafka `clicks` / `orders` / `inventory`. http://localhost:8000
   shop:
     build: ./shop
-    ports: ["8000:8000"]
+    ports: ["${SHOP_PORT:-8000}:8000"]
     depends_on:
       kafka-init: { condition: service_completed_successfully }
       schema-registry: { condition: service_healthy }
@@ -92,6 +94,8 @@ services:
       KAFKA_BOOTSTRAP: kafka:9092
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
       SHOP_DB: /data/shop.db  # catalog (seed + admin-added products); survives restarts
+      DASHBOARD_LINK: http://localhost:${DASHBOARD_PORT:-8501}  # links shown in the browser
+      KAFKA_UI_LINK: http://localhost:${KAFKA_UI_PORT:-8088}
     volumes:
       - ./catalog/products.json:/catalog/products.json:ro
       - ./schemas:/schemas:ro
@@ -115,7 +119,7 @@ services:
   # S3-compatible object store (Apache-2.0). MinIO stopped publishing images in 2025.
   rustfs:
     image: rustfs/rustfs:1.0.0
-    ports: ["9000:9000", "9001:9001"]
+    ports: ["${S3_PORT:-9000}:9000", "${S3_CONSOLE_PORT:-9001}:9001"]
     environment:
       RUSTFS_ACCESS_KEY: admin
       RUSTFS_SECRET_KEY: password
@@ -150,7 +154,7 @@ services:
   iceberg-rest:
     build: ./iceberg-rest  # apache/iceberg-rest-fixture:1.8.1 + Postgres JDBC driver
     image: lakehouse-iceberg-rest:1.8.1
-    ports: ["8181:8181"]
+    ports: ["${ICEBERG_REST_PORT:-8181}:8181"]
     depends_on:
       s3-init: { condition: service_completed_successfully }
       postgres: { condition: service_healthy }
@@ -172,7 +176,7 @@ services:
   jobmanager:
     <<: *flink
     command: jobmanager
-    ports: ["8081:8081"]
+    ports: ["${FLINK_PORT:-8081}:8081"]
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8081"]
       interval: 5s
@@ -199,8 +203,9 @@ services:
 
   # ---------- Serving ----------
   trino:
-    image: trinodb/trino:470
-    ports: ["8090:8080"]  # host 8090: 8080 is usually taken (Airflow, etc.)
+    build: ./trino   # trinodb/trino:470 with only the Iceberg plugin (see trino/Dockerfile)
+    image: lakehouse-trino:470
+    ports: ["${TRINO_PORT:-8090}:8080"]  # not 8080 on the host: usually taken (Airflow, etc.)
     mem_limit: 1536m
     restart: unless-stopped
     volumes:
@@ -208,9 +213,20 @@ services:
       - ./trino/jvm.config:/etc/trino/jvm.config:ro
     depends_on: [iceberg-rest]
 
+  # Scheduled Iceberg maintenance through Trino: compaction, snapshot expiry, orphan files.
+  maintenance:
+    build: ./maintenance
+    depends_on: [trino]  # not "healthy": a slow first start marks Trino unhealthy; maintain.py retries
+    restart: unless-stopped
+    environment:
+      TRINO_HOST: trino
+      TRINO_PORT: 8080
+      MAINTENANCE_INTERVAL_MINUTES: ${MAINTENANCE_INTERVAL_MINUTES:-10}
+      SNAPSHOT_RETENTION: ${SNAPSHOT_RETENTION:-1h}  # = the time-travel window
+
   dashboard:
     build: ./dashboard
-    ports: ["8501:8501"]
+    ports: ["${DASHBOARD_PORT:-8501}:8501"]
     depends_on: [trino]
     environment:
       TRINO_HOST: trino
@@ -218,6 +234,12 @@ services:
       SHOP_URL: http://shop:8000   # "Restock" buttons call the shop, the system of record for stock
       SCHEMA_REGISTRY_URL: http://schema-registry:8081  # the "Event schemas" card (read-only)
       DEMO_DAY_SECONDS: "60"       # 1 demo day = 60 s, so forecasts and lead times move during a demo
+      # links in the sidebar, opened by your browser (host ports from .env)
+      SHOP_LINK: http://localhost:${SHOP_PORT:-8000}
+      FLINK_LINK: http://localhost:${FLINK_PORT:-8081}
+      KAFKA_UI_LINK: http://localhost:${KAFKA_UI_PORT:-8088}
+      TRINO_LINK: http://localhost:${TRINO_PORT:-8090}
+      S3_CONSOLE_LINK: http://localhost:${S3_CONSOLE_PORT:-9001}
 
   # ---------- Tools: run on demand, only Docker needed (root Dockerfile) ----------
   tests:  # docker compose run --rm tests

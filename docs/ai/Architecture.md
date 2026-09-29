@@ -38,9 +38,14 @@ flowchart LR
 | `iceberg-rest` | `./iceberg-rest` (`apache/iceberg-rest-fixture:1.8.1` + Postgres JDBC driver) | 8181 | Iceberg REST catalog, JDBC catalog on Postgres | ~220 MB |
 | `jobmanager` / `taskmanager` | `./flink` (`lakehouse-flink:1.20`) | 8081 | Flink cluster (parallelism 2, 4 slots) | 1024 MB / 1536 MB |
 | `flink-job` | `./flink` | – | One-shot: submits `pipeline.sql` unless a job is already running | – |
-| `trino` | `trinodb/trino:470` | 8090 → 8080 | SQL over Iceberg | limit 1536 MB, heap 1 GB |
+| `trino` | `./trino` (`trinodb/trino:470`, only the Iceberg plugin kept) | 8090 → 8080 | SQL over Iceberg | limit 1536 MB, heap 1 GB |
+| `maintenance` | `./maintenance` (python:3.12-slim + Trino client) | – | Every 10 min through Trino, per table: `optimize`, `expire_snapshots` (1 h), `remove_orphan_files` | ~40 MB |
 | `dashboard` | `./dashboard` (Streamlit 1.41.1) | 8501 | Live dashboard (incl. 📦 Inventory; restocks call the shop) | ~170 MB |
 | `tests`, `demo` | `.` (root `Dockerfile`: Python 3.12 + Chromium), profile `tools` | – | On-demand toolbox: `docker compose run --rm tests` / `demo` | while running |
+
+Host ports are `${VAR:-default}` (`.env`, see `.env.example`); `scripts/ports.py` moves any port another
+program holds. The shop serves `/config.js` and the dashboard reads `*_LINK` variables, so links to
+the other UIs follow the configured ports.
 
 Volumes: `shop-data` (the shop's catalog database, including admin-added products), `s3-data`
 (RustFS) and `catalog-db` (Postgres behind the Iceberg REST catalog). Kafka has no volume, so `down`
@@ -193,6 +198,17 @@ guards this.
 On idle checkpoints Flink commits **empty snapshots** (no `added-records` in `summary`). Readers must
 tolerate that; see Rules R-SQL-1.
 
+**Maintenance next to a streaming writer.** Each commit adds a snapshot, a few small files and a new
+`metadata.json` listing every snapshot, so without upkeep all three grow forever (measured: 915 MB in S3
+for 17 MB of data, 859 MB of it old metadata). The `maintenance` service (`maintenance/maintain.py`)
+runs `optimize` → `expire_snapshots` → `remove_orphan_files` per table every 10 min through Trino, and
+the tables set `write.metadata.delete-after-commit.enabled` (`previous-versions-max` 20). It's safe
+alongside Flink: a compaction is a `replace` commit that Iceberg's optimistic concurrency orders with
+Flink's appends (a conflicting rewrite fails and is retried next round), expired snapshots are ≥ 1 h
+old while Flink's committer only looks back to its last commit (seconds ago), and orphan removal only
+touches files older than the retention (Trino's minimum is set to 10 min), far longer than any
+in-flight file. Time travel therefore reaches back `SNAPSHOT_RETENTION` (1 h).
+
 ## 8. Dashboard internals
 - `conn()` (cached Trino connection, session TZ = UTC), `query(sql) -> (DataFrame, ms)`, `show_sql`,
   and `code()` (a plain markdown fence, working around a Streamlit 1.41 `st.code` bug).
@@ -233,9 +249,8 @@ last offsets), `docker compose down` (Kafka keeps no data across `down`), start 
 |---|---|---|
 | Flink checkpoints in JobManager memory | No shared FS between containers | S3 checkpoint storage + HA JobManager (K8s operator) |
 | REST fixture (a test server) as the catalog, on Postgres | Small, standard REST API | A production catalog: Polaris / Lakekeeper / Nessie / Glue |
-| No scheduled compaction; files grow ~2 per table per checkpoint | Makes the small-files problem visible | Scheduled `rewrite_data_files` (roadmap 2.5) |
 | Single Kafka broker, RF = 1 | Memory | 3+ brokers, RF = 3, `min.insync.replicas = 2` |
-| Manual compaction button | Makes the small-files problem visible | Scheduled `rewrite_data_files`, `expire_snapshots`, `remove_orphan_files` |
+| Maintenance is a sleep loop, logging to stdout | One small container, no scheduler | An orchestrator (Airflow / Dagster) or Flink's `TableMaintenance` API, with alerting |
 | Producers auto-register schemas | One less deploy step | Register from CI (with a compatibility check) and set `auto.register.schemas=false` |
 | A non-Avro message stops the Flink job | Loud beats silent data loss | A dead-letter topic for undecodable messages (roadmap 2.4) |
 | Static demo credentials | Local only | Secrets manager, IAM |
@@ -249,10 +264,12 @@ last offsets), `docker compose down` (Kafka keeps no data across `down`), start 
 | Flink `restored` count keeps growing | Crash loop (catalog, S3, schema) | `curl localhost:8081/jobs/<jid>/exceptions` |
 | `CommitStateUnknownException` | Catalog database errors (historically `SQLITE_BUSY_SNAPSHOT` on SQLite) | `docker compose logs iceberg-rest`; the catalog must be on Postgres |
 | Revenue chart missing the latest minutes | Normal: open windows (see §7); they show faded from bronze | If *nothing* recent shows, check the Flink job state |
-| Dashboard queries slow down over hours | Small files accumulate | Compact in the Internals tab |
+| Dashboard queries slow down over hours | Maintenance not running or failing: files, snapshots and metadata grow | `docker compose logs maintenance`; the Internals caption shows the last compaction |
+| `maintenance` logs `FAILED … concurrent`/`conflict` for a table | Two rewrites of one table at once (e.g. the Compact button during a run) | Harmless: the next round retries |
 | Checkout says "Only N left" / "sold out" | Real: stock is short (409) | Restock in the admin (📦) or the dashboard |
 | Restocked, but the Inventory tab still shows old stock | Normal for ~10 s (shop → Kafka → Flink → Iceberg) | If it never updates: Flink job, `inventory` topic in Kafka UI |
 | Trino exit 137 | OOM kill | `trino/jvm.config` heap vs `mem_limit` |
+| Trino answers slowly or times out, but isn't restarting | Memory pressure: the kernel stalls it reclaiming memory | `docker compose exec trino cat /sys/fs/cgroup/memory.pressure`; keep the slim image (one plugin) |
 | Shop exits at startup with a `SchemaRegistryError` (409) | A schema change the registry rejects (not FULL-compatible) | Make the new field nullable with a default; never remove or retype fields |
 | Shop can't start / events fail with a connection error to `schema-registry` | Registry down or not healthy yet | `docker compose ps schema-registry`; `curl localhost:8085/subjects` |
 | Flink job restarts with an Avro/`Unknown magic byte` error | A non-Avro message on a topic (e.g. JSON from an old producer or the console producer) | Remove the producer; skip the message by resetting the group's offset, or wait for 24 h retention |
@@ -265,12 +282,15 @@ shop/            main.py (API, catalog store, pure logic), static/ (index.html +
 catalog/         products.json (seed catalog: 48 products)
 schemas/         clicks.avsc, orders.avsc, inventory.avsc (the event contract, registered in the registry)
 generator/       generator.py (optional simulator)
+maintenance/     maintain.py (scheduled compaction, snapshot expiry, orphan files; via Trino), Dockerfile
 flink/           Dockerfile (connector jars), sql/pipeline.sql
-trino/           catalog/lakehouse.properties, jvm.config
+trino/           Dockerfile (only the Iceberg plugin), catalog/lakehouse.properties, jvm.config
 iceberg-rest/    Dockerfile (REST fixture + Postgres JDBC driver)
 dashboard/       app.py, inventory.py (forecast + reorder math, SQL builders), .streamlit/config.toml
 tests/           pytest suite (see Rules R-TEST)
 scripts/demo.py  traffic + screenshots
+scripts/ports.py host ports: check, move busy ones into .env, host_port() for tests and scripts
+AGENTS.md        first-run checklist for AI agents and people; .env.example: every setting
 Dockerfile       toolbox image (tests + demo with only Docker); .dockerignore
 docs/            DEMO.md, screenshots/, ai/ (these docs)
 ```

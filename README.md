@@ -53,7 +53,7 @@ production streaming lakehouse works:
 | **Streaming aggregations** | 1-minute tumbling windows with the window TVF API, executed as two-phase (local → global) aggregation |
 | **Open table format** | Apache Iceberg v2 tables behind a REST catalog, Parquet + zstd, partitioned by day |
 | **Engine interoperability** | Flink writes and Trino reads the **same** tables through the **same** catalog |
-| **Lake maintenance** | Visible small-files problem, plus one-click `OPTIMIZE` compaction from the UI |
+| **Lake maintenance** | A scheduled service compacts small files, expires old snapshots and removes orphan files; streaming metadata is capped. The Internals tab shows its effect, and `OPTIMIZE` is one click away |
 | **Time travel** | Query any table as of any snapshot (`FOR VERSION AS OF`) |
 | **Contracts, not hope** | Avro schemas in a Schema Registry with FULL compatibility: a breaking change is rejected before any event is produced, and a new field reaches Iceberg without rewriting a file |
 | **Operability** | Every chart shows its SQL and latency; Flink, Kafka, Trino and S3 UIs are all exposed |
@@ -112,8 +112,17 @@ and free ports 8000, 8081, 8085, 8088, 8090, 8181, 8501, 9000, 9001 and 29092.
 ```bash
 git clone https://github.com/<you>/realtime-ecommerce-lakehouse.git
 cd realtime-ecommerce-lakehouse
+python scripts/ports.py        # optional: moves any port another program already uses (writes .env)
 docker compose up -d --build
 ```
+
+**A port is already in use?** Don't stop the other program. `python scripts/ports.py` finds a free
+port for each clash, writes it to `.env` (Docker Compose reads it automatically) and prints the URLs to
+open. No Python? `cp .env.example .env` and change the port there. Every host port is configurable.
+
+**Using an AI assistant** (Claude Code, Codex, Cursor, Gemini / Antigravity, …)? Ask it to follow
+[AGENTS.md](AGENTS.md): the first-run checklist, what to do about busy ports, and the rules for working
+on this repo.
 
 The first build downloads ~1.5 GB of images. Then open the store at **http://localhost:8000** and the
 dashboard at **http://localhost:8501** side by side, and go shopping.
@@ -162,8 +171,9 @@ Stop it with `docker compose down`, or wipe all data with `docker compose down -
    - windows run as `LocalWindowAggregate → GlobalWindowAggregate` (two-phase, which cuts shuffle volume);
    - **Checkpoints**: one completes every ~10 s, and each one is an Iceberg commit.
 5. **Dashboard → 🔬 Lakehouse Internals.** Every checkpoint adds a snapshot and more small
-   files. Press **🧹 Compact now**: Trino's `OPTIMIZE` rewrites them into fewer files while Flink keeps
-   writing (Iceberg optimistic concurrency).
+   files. The `maintenance` service compacts them every 10 minutes (the caption shows the last
+   compaction and how much history is kept), or press **🧹 Compact now**: Trino's `OPTIMIZE` rewrites
+   them into fewer files while Flink keeps writing (Iceberg optimistic concurrency).
 6. **Time travel.** Drag the snapshot slider to see the row count at any past commit.
 7. **🧪 SQL Playground.** Try the *Cart abandonment by category* example, a join across two Iceberg
    tables written by a streaming job and read by a batch engine.
@@ -242,6 +252,24 @@ message's writer schema by id. Money is an exact Avro `decimal`, time is `timest
   playground's *Schema evolution* example shows old and new rows side by side. Integration tests prove
   the registry rejects a required new field, a removed field and a changed type.
 
+### Keeping the lake healthy: [`maintenance/maintain.py`](maintenance/maintain.py)
+A streaming writer is hard on a table: Flink commits every 10 s, so each table gains ~360 snapshots
+an hour, a few small Parquet files per commit, and a new `metadata.json` per commit that carries the
+**whole** snapshot history. Left alone, this stack's warehouse reached **915 MB for 17 MB of data**
+(859 MB of it old `metadata.json`), and Trino slowed down and ran out of memory parsing it.
+
+- The **`maintenance`** service runs through Trino every `MAINTENANCE_INTERVAL_MINUTES` (10), for every
+  table in `lakehouse.shop`: `optimize` (compaction), `expire_snapshots` (older than
+  `SNAPSHOT_RETENTION`, 1 h: that's the time-travel window) and `remove_orphan_files`. One log line per
+  table: `orders: data files 14 -> 2, snapshots 360 -> 180 (2.1 s)`.
+- `pipeline.sql` sets `write.metadata.delete-after-commit.enabled` so each table keeps only its last 20
+  metadata files: the setting Iceberg recommends for streaming writers.
+- Flink keeps writing throughout: Iceberg's optimistic concurrency commits compactions next to appends,
+  and the retention (≥ 10 min) dwarfs a 10 s checkpoint, so uncommitted files are never "orphans".
+
+The first run on the grown warehouse took it from **12,158 objects / 915 MB to ~330 objects / 54 MB**,
+with every row intact (checked by count, and by each compaction's added = deleted records).
+
 ### Simulated traffic (optional): [`generator/generator.py`](generator/generator.py)
 Enabled with `--profile simulator`. Orders go through the shop's checkout, so simulated sales consume
 stock too. Each simulated session is a funnel: 1–5 page views, each with a 25 % chance of add-to-cart, and
@@ -287,7 +315,10 @@ statistics let Trino skip files outside the window.
 
 | Setting | Where | Default |
 |---|---|---|
+| Host ports (store, dashboard, Flink, Trino, …) | `.env`: `SHOP_PORT`, `DASHBOARD_PORT`, … (all in `.env.example`) | 8000, 8501, 8081, 8090, … |
 | Traffic volume (sessions per second, ±50 % sine wave) | `SESSIONS_PER_SEC` env var | `20` (~6 orders/s) |
+| Maintenance interval | `MAINTENANCE_INTERVAL_MINUTES` env var | `10` |
+| Snapshot retention (= time-travel window) | `SNAPSHOT_RETENTION` env var (≥ `10m`, Trino's configured minimum) | `1h` |
 | Checkpoint interval (= lake freshness) | `pipeline.sql` → `execution.checkpointing.interval` | `10 s` |
 | Allowed lateness | `pipeline.sql` → `WATERMARK … - INTERVAL '5' SECOND` | `5 s` |
 | Flink parallelism and slots | `docker-compose.yml` → `FLINK_PROPERTIES` | `2` / `4` |
@@ -331,11 +362,14 @@ ALTER TABLE orders EXECUTE optimize;
 .
 ├── docker-compose.yml          # the whole platform: 10 services + 3 one-shot init jobs (+ optional simulator, toolbox)
 ├── Dockerfile                  # toolbox image: run the tests and the demo with only Docker installed
+├── .env.example                # every setting you can override in .env (ports, traffic, maintenance)
+├── AGENTS.md                   # first-run checklist and rules for AI coding assistants (and people)
 ├── flink/
 │   ├── Dockerfile              # Flink 1.20 + Kafka connector + Iceberg runtime + AWS bundle + Hadoop
 │   └── sql/pipeline.sql        # ★ the streaming pipeline (sources, catalog, tables, inserts)
 ├── iceberg-rest/Dockerfile     # Iceberg REST catalog + the Postgres JDBC driver
 ├── trino/
+│   ├── Dockerfile              # trinodb/trino with only the Iceberg plugin (memory headroom)
 │   ├── catalog/lakehouse.properties   # Trino → Iceberg REST catalog + S3
 │   └── jvm.config              # fixed 1 GB heap (prevents OOM-kill in a 1.5 GB container)
 ├── shop/
@@ -346,11 +380,14 @@ ALTER TABLE orders EXECUTE optimize;
 ├── schemas/                    # ★ Avro event contracts: clicks.avsc, orders.avsc, inventory.avsc
 ├── generator/
 │   └── generator.py            # optional traffic simulator (--profile simulator)
+├── maintenance/
+│   └── maintain.py             # scheduled compaction, snapshot expiry, orphan-file cleanup (via Trino)
 ├── dashboard/
 │   ├── app.py                  # Streamlit app
 │   └── inventory.py            # demand forecast + reorder math (pure functions) and its SQL
 ├── tests/                      # pytest suite: unit, contract, API, dashboard, browser e2e, integration
 ├── scripts/demo.py             # send shopper traffic through the store + capture screenshots
+├── scripts/ports.py            # check host ports, move busy ones into .env, print the URLs
 ├── docs/                       # DEMO.md walkthrough, screenshots/, ai/ (PRD, Architecture, Rules, Design, Phases, Memory)
 ├── requirements-dev.txt        # test tooling
 ├── CLAUDE.md                   # context for AI coding assistants (incl. the mandatory testing workflow)
@@ -384,10 +421,12 @@ python -m venv .venv
 | `test_catalog_api.py` | Adding, validating, persisting and deleting products; a new product can be bought; ids are never reused |
 | `test_inventory_api.py` | Stock: checkout takes it, short stock is refused (409, no events), restock and settings, the ledger, migration of older databases, and a 25-thread race that must not oversell |
 | `test_inventory_plan.py` | Forecast and reorder math: thresholds, trend, safety stock, sold-out products, SQL-injection guard |
+| `test_ports.py` | Every host port is configurable; a busy port moves to a free one; `.env` is merged, not overwritten |
+| `test_maintenance.py` | Scheduled maintenance: the three steps in order, retention and table names validated, one failing table doesn't stop the others |
 | `test_generator.py` | Simulator funnel logic |
 | `test_dashboard.py` | Dashboard run headless (Streamlit `AppTest`) against a fake Trino: KPIs, themes, SQL guard, inventory tab and its Restock button |
 | `test_storefront_e2e.py` | A real browser (Playwright + Edge) shops: search, cart, every checkout, stock limits and sold-out, server-down handling, layout |
-| `test_integration.py` | With `docker compose up`: a real order flows through Kafka → Flink → Iceberg and is queryable in Trino; lakehouse stock matches the shop; topics carry registered Avro; the registry rejects breaking changes; a phone's `device` lands in Iceberg |
+| `test_integration.py` | With `docker compose up`: a real order flows through Kafka → Flink → Iceberg and is queryable in Trino; lakehouse stock matches the shop; topics carry registered Avro; the registry rejects breaking changes; a phone's `device` lands in Iceberg; a maintenance run keeps every row and the pipeline running |
 
 The integration tests skip when the stack isn't running. Start it first to verify the full pipeline.
 Browser tests use the installed Edge; set `E2E_BROWSER=chromium` after `playwright install chromium`
@@ -404,7 +443,7 @@ These are deliberate simplifications for a laptop demo, each with its production
 | Iceberg REST fixture (a test server) on Postgres | Standard REST API, small footprint | Polaris / Lakekeeper / Nessie / Glue |
 | Inventory events published after the DB commit | Simple; a startup snapshot re-syncs the lake | Transactional outbox (or CDC from the shop database) |
 | Single Kafka broker, RF=1 | Memory | 3+ brokers, RF=3, `min.insync.replicas=2` |
-| Manual compaction button | Makes the small-files problem visible | Scheduled `rewrite_data_files` + `expire_snapshots` + `remove_orphan_files` |
+| Maintenance as a simple loop through Trino | One small container, no scheduler to run | An orchestrator (Airflow/Dagster) or Flink's `TableMaintenance` API, with alerting on failed runs |
 | Producers auto-register schemas | One less deploy step | Register from CI with a compatibility check; `auto.register.schemas=false` |
 | A non-Avro message stops the Flink job | Loud beats silently dropping events | Dead-letter topic for undecodable messages |
 | Static demo credentials | Local only | Secrets manager, IAM roles |
@@ -414,13 +453,13 @@ These are deliberate simplifications for a laptop demo, each with its production
 | Symptom | Cause / fix |
 |---|---|
 | Dashboard says "Waiting for data" for > 2 min | Check `docker compose logs flink-job` and the Flink UI → Exceptions tab |
-| `port is already allocated` | Another app (often Airflow on 8080) holds a port. Change the host side of `ports:` in `docker-compose.yml` |
+| `port is already allocated` / `address already in use` | Another program holds a port. Run `python scripts/ports.py` (or set it in `.env`, see `.env.example`), then `docker compose up -d --build` |
 | Containers restart or Docker becomes unresponsive | Not enough memory. Give Docker ≥ 6 GB, stop other stacks, or remove `kafka-ui` |
 | `CommitStateUnknownException` in the Flink UI | Catalog database errors. The catalog must run on Postgres (it did on SQLite once and crash-looped) |
 | Latest minutes in the revenue chart look faded | Normal: those windows are still open (no newer events yet), so they're computed live from bronze and marked provisional |
 | Trino exits with code 137 | OOM-kill. Keep `trino/jvm.config` (fixed heap) and `mem_limit` together |
 | Changed `pipeline.sql` but nothing happens | The running job is kept. Cancel it in the Flink UI, then `docker compose run --rm flink-job` |
-| Dashboard slowing down after an hour or two | Small files accumulate; press **🧹 Compact now** in the Internals tab |
+| Dashboard slowing down over hours | Check `docker compose logs maintenance`: every table should log a run every 10 min. **🧹 Compact now** in the Internals tab still works by hand |
 | Shop exits at startup with `SchemaRegistryError` (409) | A schema change the registry rejects: new fields must be nullable with a default; never remove or retype one |
 | Flink job fails with an Avro / `Unknown magic byte` error | Something produced non-Avro to a topic (e.g. an old JSON producer). Stop it; see docs/ai/Architecture.md §8 for upgrading a pre-Avro stack |
 | Checkout says "Only N left" or "sold out" | Real: the stock ran out. Restock with 📦 in the admin, or from the dashboard's Inventory tab |
@@ -429,7 +468,6 @@ These are deliberate simplifications for a laptop demo, each with its production
 ## Roadmap ideas
 - [ ] Upsert (CDC) table: `customers` from Postgres via Flink CDC into an Iceberg v2 equality-delete table
 - [ ] Late-event dead-letter side output + a dashboard counter
-- [ ] Scheduled table maintenance (Airflow DAG)
 - [ ] Data-quality checks (Great Expectations / Soda) on the gold tables
 - [ ] Kubernetes deployment with the Flink operator
 - [ ] Stock in transit: restocks arrive after their lead time; a transactional outbox for inventory events

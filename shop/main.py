@@ -576,4 +576,12 @@ def checkout(c: Checkout):
     }
 
 
+@app.get("/config.js")
+def links():
+    """Links the static pages show, following the host ports in .env (docker-compose passes them)."""
+    config = {"dashboard": os.getenv("DASHBOARD_LINK", "http://localhost:8501"),
+              "kafka_ui": os.getenv("KAFKA_UI_LINK", "http://localhost:8088")}
+    return Response(f"window.LINKS = {json.dumps(config)};", media_type="text/javascript")
+
+
 app.mount("/", StaticFiles(directory=HERE / "static", html=True), name="static")

@@ -30,6 +30,7 @@ class FakeTrino:
 
     def __init__(self, fail=False, inventory=None):
         self.fail, self.queries = fail, []
+        self.upkeep = (360, 3480, 240)  # snapshots, history kept (s), last compaction (s ago)
         self.inventory = self.INVENTORY if inventory is None else inventory
 
     def cursor(self):
@@ -39,7 +40,10 @@ class FakeTrino:
         self.queries.append(sql)
         if self.fail:
             raise RuntimeError("Table 'lakehouse.shop.orders' does not exist")
-        cols, self.rows = self.data(sql, self.inventory)
+        if "history_s" in sql:  # the Internals tab's maintenance line
+            cols, self.rows = ["snapshots", "history_s", "compacted_s"], [self.upkeep]
+        else:
+            cols, self.rows = self.data(sql, self.inventory)
         self.description = [(c,) for c in cols]
 
     def fetchall(self):
@@ -73,7 +77,8 @@ class FakeTrino:
             return ["data_files", "total_bytes", "records"], [(92, 92 * 6400, 18520)]
         if "$snapshots" in sql:
             return (["committed_at", "snapshot_id", "operation", "added_records", "added_files", "total_files"],
-                    [(now - timedelta(seconds=10 * i), 9_000_000 + i, "append", 50, 2, 92 - 2 * i) for i in range(20)])
+                    [(now - timedelta(seconds=10 * i), 9_000_000 + i, "replace" if i == 5 else "append",
+                      4000 if i == 5 else 50, 2, 92 - 2 * i) for i in range(20)])
         if "count(*) AS n" in sql:
             return ["n"], [(12004 if "VERSION" in sql else 18520,)]
         if sql.startswith("ALTER TABLE"):
@@ -330,3 +335,37 @@ def test_registry_card_survives_a_missing_registry(fake):
     at = run()
     assert not at.exception
     assert any("Schema Registry not reachable" in c.value for c in at.caption)
+
+
+# ------------------------------------------------ scheduled maintenance (Internals tab)
+@pytest.mark.parametrize("upkeep,text", [
+    ((360, 3480, 240), "last compaction 4 min ago · history kept 58 min"),
+    ((12, 600, None), "last compaction not yet · history kept 10 min"),
+    ((900, 3 * 86400, 60), "last compaction 1 min ago · history kept 72 h"),
+])
+def test_internals_shows_what_maintenance_keeps(fake, upkeep, text):
+    conn = fake()
+    conn.upkeep = upkeep
+    at = run()
+    assert not at.exception
+    assert {m.label: m.value for m in at.metric}["Snapshots"] == f"{upkeep[0]:,}"  # all, not "shown"
+    assert any(text in c.value for c in at.caption), [c.value for c in at.caption if "maintenance" in c.value]
+
+
+def test_sidebar_links_follow_the_configured_ports(fake, monkeypatch):
+    monkeypatch.setenv("FLINK_LINK", "http://localhost:18081")
+    monkeypatch.setenv("SHOP_LINK", "http://localhost:18000")
+    fake(fail=True)  # also the "waiting for data" message links to the store
+    at = run()
+    assert not at.exception
+    sidebar = " ".join(m.value for m in at.sidebar.markdown)
+    assert "http://localhost:18081" in sidebar and "http://localhost:18000" in sidebar
+    assert any("http://localhost:18000" in i.value for i in at.info)
+
+
+def test_compactions_are_drawn_apart_from_appends(fake):
+    """Scheduled compactions rewrite thousands of rows; plotted as 'records added' they'd dwarf the appends."""
+    fake()
+    at = run()
+    assert not at.exception
+    assert any("Dashed lines are compactions" in c.value for c in at.caption)

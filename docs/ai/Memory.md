@@ -18,6 +18,53 @@
 
 ## 2. Decision and incident log (newest first)
 
+### 2026-09-29 · Easy first run: configurable ports and AGENTS.md (Phase 12)
+- **Owner's request:** anyone, or their AI assistant (Claude Code, Codex, Antigravity, …), should be
+  able to run the stack; a busy port should move *our* port, never stop the other program.
+- **Rehearsed for real:** a stand-in program on 8501 → `ports.py --check` reported it (exit 1) →
+  `ports.py` wrote `DASHBOARD_PORT=8502` → `up -d --build` put the dashboard on 8502, the other program
+  kept 8501, and the store's links (`/config.js`) pointed at 8502. Data survived the down/up exactly
+  (137,154 clicks, 4,358 orders; +50 stock rows = the shop's startup snapshot).
+- **Found by the rehearsal:** on a cold start Trino took ~70 s, its image's health check called it
+  `unhealthy` first, and Compose refused to start `maintenance` (which waited on `service_healthy`).
+  **Now:** it depends on Trino being started only; `maintain.py` already retries every minute.
+- **`.env` has inline comments** (`SHOP_PORT=8000   # store`): Compose strips them, so `ports.py` does too
+  and keeps them when it rewrites a value.
+
+### 2026-09-29 · Scheduled table maintenance (Phase 11)
+- **Why now:** Trino stalled at its 1.5 GiB limit two days running. The owner moved on to the phase
+  recommended for it (roadmap 2.5).
+- **The real cost was metadata, not small data files.** Measured on the owner's stack: S3 held
+  12,158 objects / 915 MB, of which **859 MB was `metadata.json`** (2,993 files) for **17 MB of Parquet**.
+  Every Flink commit writes a new metadata file listing every snapshot, Iceberg keeps the old ones by
+  default, and Trino parses the current one for every query. **Now:** a `maintenance` service
+  (optimize → expire_snapshots → remove_orphan_files, every 10 min, 1 h retention) and
+  `write.metadata.delete-after-commit.enabled` with 20 versions (Rules R-FLINK-5, R-OPS-8).
+- **First run on the grown warehouse:** 12,158 objects / 915 MB → ~330 / 54 MB; snapshots per table
+  690 → ~33; 25–85 s per table for the backlog, 1–3 s per table afterwards. Every row intact: the
+  pre-Avro counts (20,433 / 2,292 / 1,869 / $205,852.81) were unchanged, and each compaction's
+  added-records equalled its deleted-records.
+- **The root cause of "Trino stops answering" was memory pressure, not a crash.** During the soak,
+  samples that overlapped a maintenance run timed out. Inside the container, `anon` memory was
+  1.57 GB of the 1.61 GB limit, `memory.events max` had fired 109,018 times, and
+  `memory.pressure full avg10` reached 59%: the kernel stalled Trino reclaiming pages, with no OOM
+  and no restart to show for it. The stock image loads all 56 plugins, and their classes' native
+  memory left the 1 GB heap no headroom. **Now:** `trino/Dockerfile` keeps only the Iceberg plugin:
+  anon 0.84 GiB, stalled 0.01% under the same load (Rules R-OPS-2).
+- **Orphan removal is the expensive step** (15 s of a 23 s run on `orders`: it lists every object under
+  the table) while orphans only come from failed commits. **Now:** at most hourly.
+- **Trino refuses short retentions** (`iceberg.expire-snapshots.min-retention`, default 7 d). Lowered
+  to 10m in the catalog file: still far longer than a 10 s checkpoint, so in-flight files are safe.
+- **Self-inflicted again:** `docker compose up -d maintenance` without `--no-deps` recreated Trino twice
+  (and the catalog), so Flink restored 12 times. The rule was in CLAUDE.md already; it's now a gotcha
+  with this example.
+- **A skipped integration test hid nothing but proved nothing:** the stack probe gave Trino 3 s, and
+  Trino busy with the first maintenance run missed it, so the test skipped. The probe now waits 10 s
+  and tries 3 times.
+- **Maintenance vs. the service in tests:** the integration test runs maintenance on `orders` only
+  and retries once, because the scheduled service may be rewriting the same table at that moment and
+  Iceberg rejects one of two concurrent rewrites.
+
 ### 2026-09-29 · Schema Registry + Avro (Phase 10)
 - **Owner decisions:** Avro with the **Confluent Schema Registry** (`cp-schema-registry`, over Karapace
   and Apicurio); the next phase after inventory was chosen over CI and table maintenance.
@@ -195,7 +242,7 @@
 
 ## 3. Useful facts
 - End-to-end latency is ~7–15 s. Gold windows appear ~65 s after a minute starts.
-- Stack memory is ~5 GB (the registry adds ~300 MB). Test suite: 237 tests, ~7 min locally.
+- Stack memory is ~5 GB (the registry adds ~300 MB). Test suite: 269 tests, ~7 min locally, ~6 min in the toolbox.
 - Test cards: `4242 4242 4242 4242` approves; `4000 0000 0000 0002` and `4000 0000 0000 9995` decline.
 - The shop without Docker: `cd shop && uvicorn main:app --port 8000` prints events (dry run).
 - Recreate screenshots: `docker compose run --rm demo` (or `.venv/Scripts/python scripts/demo.py`);

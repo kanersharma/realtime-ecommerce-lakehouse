@@ -25,12 +25,13 @@ REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8085")  # read
 STATUS_COLORS = {"Out of stock": "#C62828", "Reorder now": "#F2A900", "Reorder soon": "#FFE08A",
                  "OK": "#7CE0C3", "No demand": "#C9C9C9"}
 READ_ONLY = ("select", "with", "show", "describe", "explain")
+SHOP_LINK = os.getenv("SHOP_LINK", "http://localhost:8000")  # links open in the browser: host ports (.env)
 LINKS = {
-    "🛒 Lakeshop (make real events)": "http://localhost:8000",
-    "Flink UI (jobs, checkpoints)": "http://localhost:8081",
-    "Kafka UI (topics, messages)": "http://localhost:8088",
-    "Trino UI (queries)": "http://localhost:8090",
-    "RustFS console (Parquet files)": "http://localhost:9001",
+    "🛒 Lakeshop (make real events)": SHOP_LINK,
+    "Flink UI (jobs, checkpoints)": os.getenv("FLINK_LINK", "http://localhost:8081"),
+    "Kafka UI (topics, messages)": os.getenv("KAFKA_UI_LINK", "http://localhost:8088"),
+    "Trino UI (queries)": os.getenv("TRINO_LINK", "http://localhost:8090"),
+    "RustFS console (Parquet files)": os.getenv("S3_CONSOLE_LINK", "http://localhost:9001"),
 }
 
 st.set_page_config(page_title="Real-time Lakehouse", page_icon="⚡", layout="wide")
@@ -312,12 +313,17 @@ def registry(path):
 
 def waiting(err):
     st.info(
-        "⏳ **Waiting for data.** Go shop at [Lakeshop](http://localhost:8000) (or start the "
+        f"⏳ **Waiting for data.** Go shop at [Lakeshop]({SHOP_LINK}) (or start the "
         "simulator with `docker compose --profile simulator up -d`). Flink commits to Iceberg every "
         "10 s, and the first windowed aggregates appear ~1 minute later. This page refreshes on its own."
     )
     with st.expander("Details"):
         code(str(err))
+
+
+def duration(seconds):
+    minutes = int(seconds // 60)
+    return f"{minutes} min" if minutes < 120 else f"{minutes / 60:.0f} h"
 
 
 def pct_delta(now, prev):
@@ -658,18 +664,31 @@ ORDER BY committed_at DESC
 LIMIT 200
 """
         snaps, snaps_ms = query(snaps_sql)
+        upkeep_sql = f"""
+-- What the scheduled maintenance leaves: expired snapshots bound the history, compactions are 'replace'
+SELECT count(*) AS snapshots,
+       date_diff('second', min(committed_at), current_timestamp) AS history_s,
+       date_diff('second', max(committed_at) FILTER (WHERE operation = 'replace'), current_timestamp) AS compacted_s
+FROM "{table}$snapshots"
+"""
+        upkeep, upkeep_ms = query(upkeep_sql)
     except Exception as err:
         waiting(err)
         return
 
-    fr = files.iloc[0]
+    fr, up = files.iloc[0], upkeep.iloc[0]
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Snapshots (shown)", len(snaps))
+    c1.metric("Snapshots", f"{int(up.snapshots):,}", help="Older ones expire (scheduled maintenance)")
     c2.metric("Live data files", f"{int(fr.data_files):,}")
     c3.metric("Avg file size", f"{fr.total_bytes / max(fr.data_files, 1) / 1024:,.1f} KB",
               help="Parquet likes ~128-512 MB files. Tiny files = slow scans.")
     c4.metric("Records", f"{int(fr.records):,}")
     show_sql(files_sql, files_ms, len(files))
+    compacted = "not yet" if pd.isna(up.compacted_s) else f"{duration(up.compacted_s)} ago"
+    st.caption(f"🧹 **Scheduled maintenance** (the `maintenance` service): last compaction {compacted} · "
+               f"history kept {duration(up.history_s)} (older snapshots and the files only they used "
+               "are expired, orphan files removed).")
+    show_sql(upkeep_sql, upkeep_ms, len(upkeep))
 
     if st.button(f"🧹 Compact `{table}` now (Trino OPTIMIZE)", type="primary"):
         sql = f"ALTER TABLE {table} EXECUTE optimize"
@@ -684,12 +703,20 @@ LIMIT 200
     st.write("")
     with card("Commits over time", "1 SNAPSHOT PER CHECKPOINT"):
         if not snaps.empty:
-            draw(alt.Chart(snaps).mark_line(color=PINK, strokeWidth=3, point=alt.OverlayMarkDef(
-                    fill=PINK, stroke=M["ink"], strokeWidth=1.5, size=60)).encode(
-                x=alt.X("committed_at:T", title=None, scale=alt.Scale(type="utc")),  # UTC like the rest of the page
-                y=alt.Y("added_records:Q", title="Records added"),
-                tooltip=[alt.Tooltip("committed_at:T", format="%H:%M:%S", formatType="utc"), "operation", "added_records", "added_files"],
-            ), height=240)
+            # Flink's appends as the line; compactions (`replace`, rewriting thousands of rows) as dashed
+            # rules, or their rewritten rows would flatten the appends into the axis.
+            x = alt.X("committed_at:T", title=None, scale=alt.Scale(type="utc"))  # UTC like the rest of the page
+            when = alt.Tooltip("committed_at:T", format="%H:%M:%S", formatType="utc")
+            draw(alt.Chart(snaps[snaps.operation != "replace"]).mark_line(
+                     color=PINK, strokeWidth=3, point=alt.OverlayMarkDef(fill=PINK, stroke=M["ink"], strokeWidth=1.5, size=60)
+                 ).encode(x=x, y=alt.Y("added_records:Q", title="Records added"),
+                          tooltip=[when, "operation", "added_records", "added_files"])
+                 + alt.Chart(snaps[snaps.operation == "replace"]).mark_rule(
+                     color=M["ink"], strokeWidth=2, strokeDash=[5, 4]).encode(x=x, tooltip=[when, "operation"]),
+                 height=240)
+            if (snaps.operation == "replace").any():
+                st.caption("Dashed lines are compactions: `replace` commits that rewrite small files into "
+                           "bigger ones without adding rows.")
         st.dataframe(snaps.astype({"snapshot_id": str}), hide_index=True, use_container_width=True)  # ids, not numbers
         show_sql(snaps_sql, snaps_ms, len(snaps))
 

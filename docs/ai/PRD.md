@@ -64,6 +64,7 @@ One command starts everything: `docker compose up -d --build`.
 | ID | Requirement |
 |---|---|
 | P-1 | Kafka topics `clicks` and `orders` (keyed by `user_id`) and `inventory` (keyed by `product_id`), 3 partitions each, carrying **Avro** |
+| P-8 | Tables stay healthy without anyone clicking: scheduled compaction, snapshot expiry (1 h time travel) and orphan-file removal; metadata files capped per table |
 | P-7 | A Schema Registry holds each topic's schema (`schemas/*.avsc`) with **FULL** compatibility: a breaking change is rejected before any event is produced. Schemas evolve by adding optional fields (clicks v2 added `device`); Iceberg adds the column in place |
 | P-2 | Flink SQL job with 5 sinks: bronze `clicks`, `orders` and `inventory_movements`; gold `revenue_per_minute` and `funnel_per_minute` |
 | P-3 | Event-time processing: 5 s watermark and 1-minute tumbling windows |
@@ -76,7 +77,7 @@ One command starts everything: `docker compose up -d --build`.
 |---|---|
 | D-1 | Live tab: KPIs (5-minute revenue and orders with deltas, AOV, 15-minute conversion, data freshness), revenue per minute by category (closed windows plus provisional open minutes, so a single order shows even in a quiet store), funnel, top products, revenue by country; auto-refresh |
 | D-2 | Every widget exposes its SQL and latency |
-| D-3 | Internals tab per table: snapshots, file counts and sizes, one-click `OPTIMIZE`, time-travel slider |
+| D-3 | Internals tab per table: snapshots, file counts and sizes, the last scheduled compaction and the history kept, one-click `OPTIMIZE`, time-travel slider |
 | D-4 | SQL playground, read-only (`SELECT/WITH/SHOW/DESCRIBE/EXPLAIN` only), with examples |
 | D-5 | Light and dark themes, persisted in the URL (`?theme=dark`) |
 | D-6 | A friendly "waiting for data" state that points users to the store |
@@ -96,7 +97,7 @@ One command starts everything: `docker compose up -d --build`.
 | Area | Target |
 |---|---|
 | Freshness | Event to visible in Trino in ≤ ~15 s (checkpoint 10 s + commit) |
-| Footprint | Whole stack ≤ ~5 GB RAM; Docker Desktop needs ≥ 6 GB allocated |
+| Footprint | Whole stack ≤ ~5 GB RAM; Docker Desktop needs ≥ 6 GB allocated; storage and query time stay flat over hours of traffic |
 | Startup | Pipeline running within ~2 min of `up` (after images are cached) |
 | Correctness | No duplicate or partial rows (exactly-once); the server sets prices and totals; stock never goes negative, even under concurrent checkouts; no event is dropped silently (registered Avro only, no "ignore parse errors") |
 | Security | Demo credentials only; card data never stored, logged or emitted; read-only SQL playground |
@@ -110,5 +111,5 @@ One command starts everything: `docker compose up -d --build`.
 
 ## 9. Open questions and future scope
 See [Phases.md](Phases.md) §2: inventory follow-ups (stock in transit, a transactional outbox),
-CDC upserts, late-event handling, scheduled table maintenance, a production
+CDC upserts, late-event handling, a production
 catalog server, data-quality checks, CI, Kubernetes, and a hosted demo.

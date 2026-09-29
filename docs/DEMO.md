@@ -147,7 +147,11 @@ rows from before v2 (NULL device) and the new ones, in the same table, with no m
 ![Lakehouse internals](screenshots/dashboard-internals.png)
 
 - Every checkpoint is an **Iceberg snapshot**, which gives readers exactly-once data but lots of small files.
-- Press **🧹 Compact now** to run Trino's `OPTIMIZE` while Flink keeps writing.
+- A **maintenance service** compacts every table every 10 minutes, expires snapshots older than an
+  hour, and removes orphan files (`docker compose logs maintenance`). The caption under the tiles shows
+  the last compaction and how much history is kept. Without it, this stack once grew to 915 MB of files
+  for 17 MB of data.
+- Press **🧹 Compact now** to run Trino's `OPTIMIZE` by hand while Flink keeps writing.
 - Drag the **time travel** slider to query the table as it was at any earlier snapshot.
 
 The SQL playground runs read-only SQL across tables that a streaming job wrote and a batch engine

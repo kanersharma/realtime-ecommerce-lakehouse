@@ -6,3 +6,4 @@
 **/*.pyc
 shop/data
 docs/screenshots
+.env

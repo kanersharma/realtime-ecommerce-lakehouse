@@ -13,23 +13,28 @@ import urllib.request
 import uuid
 
 import pytest
+from ports import host_port  # scripts/ports.py: the environment, then .env, then the default port
 
 pytestmark = pytest.mark.integration
-SHOP = os.getenv("SHOP_URL", "http://localhost:8000")
+SHOP = os.getenv("SHOP_URL", f"http://localhost:{host_port('SHOP_PORT')}")
 TRINO_HOST = os.getenv("TRINO_HOST", "localhost")
-TRINO_PORT = int(os.getenv("TRINO_PORT", "8090"))
-KAFKA = os.getenv("KAFKA_BOOTSTRAP", "localhost:29092")
-REGISTRY = os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8085")
+TRINO_PORT = host_port("TRINO_PORT")
+KAFKA = os.getenv("KAFKA_BOOTSTRAP", f"localhost:{host_port('KAFKA_PORT')}")
+REGISTRY = os.getenv("SCHEMA_REGISTRY_URL", f"http://localhost:{host_port('REGISTRY_PORT')}")
 IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
 TIMEOUT = 120  # checkpoint every 10 s; allow for a cold Flink job
 
 
-def reachable(url):
-    try:
-        urllib.request.urlopen(url, timeout=3)
-        return True
-    except (urllib.error.URLError, OSError):
-        return False
+def reachable(url, tries=3):
+    """Generous on purpose: Trino busy with a maintenance run can miss a short probe, and a skip here
+    silently means "not verified"."""
+    for _ in range(tries):
+        try:
+            urllib.request.urlopen(url, timeout=10)
+            return True
+        except (urllib.error.URLError, OSError):
+            time.sleep(2)
+    return False
 
 
 @pytest.fixture(scope="module")
@@ -296,3 +301,34 @@ def test_sql_playground_examples_run_on_real_trino(stack):
     _, conn = stack
     for name, sql in examples.items():
         query(conn, sql)  # raises on invalid SQL or a missing column
+
+
+# ------------------------------------------------ scheduled maintenance (Phase 11)
+def test_scheduled_maintenance_keeps_every_row_and_the_pipeline_running(stack):
+    """One maintenance run on the live `orders` table: the compaction rewrites rows without losing any,
+    snapshots past the retention are gone, and new orders still land afterwards."""
+    import maintain
+    http, conn = stack
+    lines = []
+    for attempt in range(2):  # the scheduled service may be rewriting the same table right now
+        result = maintain.run_once(conn.cursor(), maintain.RETENTION, lines.append, tables=["orders"])["orders"]
+        if not isinstance(result, Exception):
+            break
+        time.sleep(10)
+    assert not isinstance(result, Exception), lines
+    (files_before, _), (files_after, _) = result
+    assert files_after <= files_before, lines
+
+    rewrites = query(conn, 'SELECT element_at(summary, \'added-records\'), element_at(summary, \'deleted-records\') '
+                           'FROM "orders$snapshots" WHERE operation = \'replace\'')
+    assert all(added == deleted for added, deleted in rewrites), rewrites
+    assert query(conn, 'SELECT count(*) FROM "orders$snapshots" '
+                       "WHERE committed_at < current_timestamp - INTERVAL '65' MINUTE") == [[0]]
+
+    session = f"S-it{uuid.uuid4().hex[:12]}"
+    in_stock(http, "P021", 1)
+    r = http.post("/api/checkout", json={
+        "user_id": f"W-it{uuid.uuid4().hex[:12]}", "session_id": session, "name": "Integration Test",
+        "country": "IN", "items": [{"product_id": "P021", "quantity": 1}], "payment": {"method": "cod"}})
+    assert r.status_code == 200, r.text
+    poll(conn, f"SELECT count(*) FROM orders WHERE session_id = '{session}'", [[1]])

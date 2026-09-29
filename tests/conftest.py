@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path[:0] = [str(ROOT / "shop"), str(ROOT / "generator"), str(ROOT / "dashboard")]
+sys.path[:0] = [str(ROOT / d) for d in ("shop", "generator", "dashboard", "maintenance", "scripts")]
 
 import main as shop  # noqa: E402  (shop/main.py)
 

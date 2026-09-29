@@ -16,7 +16,9 @@
 | 7 | AI reference docs (this folder) | `b6fee8a` | 2026-09-28 |
 | 8 | Catalog management, reviews, Postgres catalog | `4a03290`, `47591c5` | 2026-09-28 |
 | 9 | Inventory and demand forecasting; Docker toolbox | `fa5d9b5` | 2026-09-28 |
-| 10 | Schema Registry + Avro, schema evolution | see `git log` | 2026-09-29 |
+| 10 | Schema Registry + Avro, schema evolution | `5d8d635` | 2026-09-29 |
+| 11 | Scheduled table maintenance; slim Trino | see `git log` | 2026-09-29 |
+| 12 | Easy first run: configurable ports, AGENTS.md | see `git log` | 2026-09-29 |
 
 ### Phase 1: Streaming lakehouse core
 Kafka → Flink SQL → Iceberg (REST catalog) → Trino → Streamlit, plus a Python simulator.
@@ -132,6 +134,66 @@ playground guard refused commented SQL; the dashboard container lacked the regis
 stack was migrated: 20,433 pre-Avro clicks read `device = NULL`, exactly the count before the cutover.
 Tests: 242 (contract, device, registry, Avro wire format, every playground example through the UI).
 
+### Phase 11: Scheduled table maintenance
+> **Delivered.** Roadmap 2.5, chosen after Trino stalled at its memory limit two days running.
+
+Measured before (owner's stack, 2026-09-29): S3 held **859 MB of `metadata.json`** (2,993 files) for
+**17 MB of Parquet**. Every Flink commit writes a new metadata file containing the whole snapshot
+history, and nothing deletes the old ones; snapshots (684 per table in a day) and small files only
+shrank when someone pressed Compact.
+
+- **`maintenance` service** (Python + Trino client, no Airflow: the stack must stay under ~5 GB). Every
+  `MAINTENANCE_INTERVAL_MINUTES` (10), for every table in `lakehouse.shop`: `optimize` (compaction),
+  `expire_snapshots` (keep `SNAPSHOT_RETENTION`, 1 h of time travel), `remove_orphan_files`. One log
+  line per table: files and snapshots before → after. One failing table doesn't stop the others.
+- **Metadata files:** `write.metadata.delete-after-commit.enabled` with `previous-versions-max = 20`
+  (set in `pipeline.sql`), the setting Iceberg recommends for streaming writers.
+- **Trino:** lower `iceberg.expire-snapshots.min-retention` / `remove-orphan-files.min-retention`
+  (default 7 d) so a 1 h retention is allowed.
+- **Dashboard (Internals):** last compaction and the history kept, read from `$snapshots`.
+
+✅ Done when:
+1. The service runs on its own and logs every table; unit tests cover order, retention and failures.
+2. Integration: one maintenance run against live Trino compacts, expires old snapshots and keeps every
+   row (a compaction's added-records = deleted-records); the Flink job keeps running (`restored` 0)
+   and a new order still lands.
+3. A 1-hour soak with the simulator: data files, snapshots and metadata files per table plateau,
+   S3 stops growing with commits, and query latency and Trino memory stay flat. Evidence recorded here.
+4. Full suite green locally and in the toolbox; docs and screenshots updated.
+
+**Results.** The first run on the grown warehouse: 12,158 objects / 915 MB → ~330 / 54 MB, every row
+intact. Two soaks with the simulator (5 sessions/s), maintenance every 10 min, retention 20 min (so the
+window fills within the hour):
+
+| | Soak 1 (stock Trino, 65 min) | Soak 2 (slim Trino, 35 min) |
+|---|---|---|
+| Snapshots per busy table | grew to ~150, then **flat** (~116 after each run) | 123–156, flat |
+| Data files per table | sawtooth, 4–8 after each run, ≤ 122 before | 5–84 |
+| `metadata.json` in S3 | 105 files (21 per table), 7–11 MB | 105 files, ~8 MB |
+| Manifests / Parquet in S3 | peaked 1,384 / 863 files, then fell | ~800–1,000 / ~450–530 files |
+| Funnel query | 0.7–2 s, **3 of 11 samples timed out** | 0.7–2 s, **no timeouts** |
+| Trino memory stalled (`memory.pressure` full) | up to **59 %** of the time | ≤ 0.25 % |
+| Flink restores | 0 new | 0 new |
+
+Found on the way: Trino's stalls came from memory pressure (56 plugins' native memory left the 1 GB heap
+no headroom): **`trino/Dockerfile` keeps only the Iceberg plugin**. Orphan removal was the slowest step
+(15 s a table) for a rare problem: now hourly.
+
+### Phase 12: Easy first run, for people and AI agents
+Asked by the owner mid-phase: anyone (or their AI assistant: Claude Code, Codex, Antigravity, …)
+should get the stack running, and a busy port should move our port, not stop the other program.
+
+- Every host port is `${VAR:-default}` in `docker-compose.yml`; `.env.example` lists them all.
+- `scripts/ports.py`: checks each port (connect + bind), moves busy ones to the next free port that no
+  other service uses, merges them into `.env`, prints the URLs; `--check` only reports; leaves a
+  running stack alone. `host_port()` gives tests and `scripts/demo.py` the same ports.
+- Links follow the ports: the shop serves `/config.js` for the store and admin pages; the dashboard
+  reads `*_LINK` variables.
+- `AGENTS.md`: the first-run checklist and rules for any AI agent (and people); CLAUDE.md and the
+  README point to it.
+- Tests: `test_ports.py` (incl. "no hard-coded host port in compose"), `/config.js`, dashboard links,
+  and an e2e test that the store's links follow the configuration.
+
 ## 2. Roadmap (not started)
 Ordered roughly by value. Each item lists acceptance criteria; per R-TEST, every item
 also ships with tests.
@@ -161,11 +223,6 @@ also ships with tests.
 ### 2.4 Late events and a dead-letter queue
 - Events later than the watermark go to a side output → `late_events` table, with a dashboard counter.
 - ✅ Done when: the simulator can inject late events and the counter moves.
-
-### 2.5 Scheduled table maintenance
-- A scheduler (an Airflow DAG or a small cron container) runs
-  `optimize`, `expire_snapshots` and `remove_orphan_files` per table.
-- ✅ Done when: the file count stays bounded over a 1-hour soak.
 
 ### 2.6 Production-grade catalog
 - The catalog already runs on Postgres (Phase 8). The remaining step is to replace the REST *fixture*
